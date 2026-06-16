@@ -69,9 +69,8 @@ fun PlayerGestureOverlay(
     var showSpeedIndicator by remember { mutableStateOf(false) }
     var isLongPressActive by remember { mutableStateOf(false) }
 
-    // Virtual volume percent (0 - 200%) and drag accumulator
+    // Virtual volume percent (0 - 200%)
     var volumePercent by remember { mutableIntStateOf(100) }
-    var volumeAccumulator by remember { mutableFloatStateOf(0f) }
 
     // Sync system volume to virtual volumePercent initially
     LaunchedEffect(Unit) {

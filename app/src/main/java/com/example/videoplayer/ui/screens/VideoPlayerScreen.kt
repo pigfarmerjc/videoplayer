@@ -118,6 +118,7 @@ import com.example.videoplayer.ui.theme.*
 import com.example.videoplayer.util.SimpleGifEncoder
 import com.example.videoplayer.util.DlnaCastManager
 import com.example.videoplayer.util.DlnaDevice
+import com.example.videoplayer.util.AudioEffectManager
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.BorderStroke
@@ -204,6 +205,8 @@ fun VideoPlayerScreen(
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
     var showSettings by remember { mutableStateOf(false) }
+    var virtualVolumePercent by remember { mutableIntStateOf(100) }
+    var currentEqPreset by remember { mutableStateOf("Normal") }
     var showInfo by remember { mutableStateOf(false) }
     var playbackSpeed by remember { mutableFloatStateOf(1f) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
@@ -854,6 +857,18 @@ fun VideoPlayerScreen(
 
                 player = exoPlayer
 
+                // Initialize audio effects immediately with active session ID
+                val initialSessionId = exoPlayer.audioSessionId
+                if (initialSessionId != androidx.media3.common.C.AUDIO_SESSION_ID_UNSET) {
+                    AudioEffectManager.onSessionChanged(initialSessionId)
+                    if (virtualVolumePercent > 100) {
+                        AudioEffectManager.setVolumeBoost(initialSessionId, virtualVolumePercent)
+                    }
+                    if (currentEqPreset != "Normal") {
+                        AudioEffectManager.applyPreset(initialSessionId, currentEqPreset)
+                    }
+                }
+
                 val listener = object : Player.Listener {
                     override fun onIsPlayingChanged(playing: Boolean) {
                         isPlaying = playing
@@ -935,6 +950,10 @@ fun VideoPlayerScreen(
                         useVlcFallback = true
                     }
 
+                    override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                        AudioEffectManager.onSessionChanged(audioSessionId)
+                    }
+
                     override fun onPositionDiscontinuity(
                         oldPosition: Player.PositionInfo,
                         newPosition: Player.PositionInfo,
@@ -973,6 +992,7 @@ fun VideoPlayerScreen(
                     player = null
                     runCatching { p.release() }
                 }
+                AudioEffectManager.releaseAll()
             }
         }
     }
@@ -1022,6 +1042,7 @@ fun VideoPlayerScreen(
         onDispose {
             MainActivity.isVideoPlaying = false
             markIfWatched()
+            AudioEffectManager.releaseAll()
             activity?.let { act ->
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 // Restore screen brightness when leaving the player.
@@ -1100,6 +1121,18 @@ fun VideoPlayerScreen(
             isEnabled = !MainActivity.isInPipMode.value,
             onSingleTap = { showControls = !showControls },
             onCenterDoubleTap = { togglePlayPause() },
+            onVolumePercentChange = { percent ->
+                virtualVolumePercent = percent
+                if (!useVlcFallback) {
+                    val p = player
+                    if (p != null) {
+                        val id = p.audioSessionId
+                        if (id != androidx.media3.common.C.AUDIO_SESSION_ID_UNSET) {
+                            AudioEffectManager.setVolumeBoost(id, percent)
+                        }
+                    }
+                }
+            },
             onDoubleTapSeek = { delta ->
                 val target = (currentPosition + delta).coerceIn(0L, duration.coerceAtLeast(0L))
                 val wasPlaying = isPlaying
@@ -1179,6 +1212,7 @@ fun VideoPlayerScreen(
                         item = currentVideo,
                         startPosition = currentPosition,
                         playbackSpeed = playbackSpeed,
+                        volume = virtualVolumePercent,
                         onReady = { playerReadyFlow.tryEmit(Unit) },
                         onBindControls = { toggle, seek, speed, pause, _, _, setAudio, _, _, setSub, snapshot ->
                             vlcTogglePlayPause = toggle
@@ -1710,6 +1744,19 @@ fun VideoPlayerScreen(
             },
             audioOptions = audioOptions,
             subtitleOptions = subtitleOptions,
+            currentPreset = currentEqPreset,
+            onPresetChange = { preset ->
+                currentEqPreset = preset
+                if (!useVlcFallback) {
+                    val p = player
+                    if (p != null) {
+                        val id = p.audioSessionId
+                        if (id != androidx.media3.common.C.AUDIO_SESSION_ID_UNSET) {
+                            AudioEffectManager.applyPreset(id, preset)
+                        }
+                    }
+                }
+            },
             isBackgroundPlayEnabled = isBackgroundPlayEnabled,
             onBackgroundPlayChange = {
                 isBackgroundPlayEnabled = it
@@ -2280,6 +2327,7 @@ private fun VlcPlayerSurface(
     item: PlayerMediaItem,
     startPosition: Long,
     playbackSpeed: Float,
+    volume: Int = 100,
     onReady: () -> Unit = {},
     onBindControls: (
         togglePlayPause: () -> Unit,
@@ -2329,6 +2377,12 @@ private fun VlcPlayerSurface(
         )
     }
     val mediaPlayer = remember { VlcMediaPlayer(libVlc) }
+
+    LaunchedEffect(volume) {
+        runCatching {
+            mediaPlayer.volume = volume.coerceIn(0, 200)
+        }
+    }
 
     // Mount the SurfaceView once.
     AndroidView(
@@ -2708,6 +2762,8 @@ private fun PlayerSettingsDialog(
     onToggleDecoder: () -> Unit,
     audioOptions: List<TrackOption>,
     subtitleOptions: List<TrackOption>,
+    currentPreset: String,
+    onPresetChange: (String) -> Unit,
     isBackgroundPlayEnabled: Boolean,
     onBackgroundPlayChange: (Boolean) -> Unit,
     isPipEnabled: Boolean,
@@ -2789,6 +2845,20 @@ private fun PlayerSettingsDialog(
                                 selected = option.isSelected,
                                 onClick = { option.onSelect() },
                                 label = { Text(option.label) }
+                            )
+                        }
+                    }
+                }
+
+                // Equalizer presets for ExoPlayer mode
+                if (!useVlcFallback) {
+                    Text("声音均衡器预设", color = Color.White, fontWeight = FontWeight.Bold)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Normal", "Bass Boost", "Vocal Clear", "Rock", "Pop", "Classical").forEach { preset ->
+                            FilterChip(
+                                selected = currentPreset == preset,
+                                onClick = { onPresetChange(preset) },
+                                label = { Text(preset) }
                             )
                         }
                     }
