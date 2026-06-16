@@ -44,6 +44,7 @@ fun PlayerGestureOverlay(
     onSingleTap: () -> Unit,
     onCenterDoubleTap: () -> Unit,
     onDoubleTapSeek: (Long) -> Unit, // seek delta in ms (+10000 or -10000)
+    onVolumePercentChange: (Int) -> Unit = {}, // 0 to 200% volume callback
     onScrub: (Long) -> Unit = {},
     onScrubFinished: (Long) -> Unit = {},
     onLongPressSpeed: (Boolean) -> Unit, // true for 2x, false for normal
@@ -67,6 +68,16 @@ fun PlayerGestureOverlay(
 
     var showSpeedIndicator by remember { mutableStateOf(false) }
     var isLongPressActive by remember { mutableStateOf(false) }
+
+    // Virtual volume percent (0 - 200%) and drag accumulator
+    var volumePercent by remember { mutableIntStateOf(100) }
+    var volumeAccumulator by remember { mutableFloatStateOf(0f) }
+
+    // Sync system volume to virtual volumePercent initially
+    LaunchedEffect(Unit) {
+        val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        volumePercent = if (maxVolume > 0) (currentVol.toFloat() / maxVolume * 100).toInt() else 100
+    }
 
     // Pull-down indicator
     var showPullDownHint by remember { mutableStateOf(false) }
@@ -92,6 +103,7 @@ fun PlayerGestureOverlay(
     val currentOnSingleTap by rememberUpdatedState(onSingleTap)
     val currentOnCenterDoubleTap by rememberUpdatedState(onCenterDoubleTap)
     val currentOnDoubleTapSeek by rememberUpdatedState(onDoubleTapSeek)
+    val currentOnVolumePercentChange by rememberUpdatedState(onVolumePercentChange)
     val currentOnScrub by rememberUpdatedState(onScrub)
     val currentOnScrubFinished by rememberUpdatedState(onScrubFinished)
     val currentOnLongPressSpeed by rememberUpdatedState(onLongPressSpeed)
@@ -182,6 +194,11 @@ fun PlayerGestureOverlay(
                             volumeAccumulator = 0f
                             dragType = 0
                             showPullDownHint = false
+                            
+                            val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                            if (currentVol < maxVolume) {
+                                volumePercent = if (maxVolume > 0) (currentVol.toFloat() / maxVolume * 100).toInt() else 100
+                            }
 
                             val activity = findActivity(context)
                             val lp = activity?.window?.attributes
@@ -288,20 +305,50 @@ fun PlayerGestureOverlay(
                                 }
 
                                 3 -> {
-                                    // 音量调节：累积积分确保整数步长，避免跳帧
-                                    val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                                    volumeAccumulator += (-dragAmount.y / screenHeight.toFloat()) * maxVolume.toFloat()
+                                    // Calculate raw delta in percentage points (0 to 200)
+                                    val rawDeltaPercent = (-dragAmount.y / screenHeight.toFloat()) * 200f
+                                    
+                                    // Apply progressive damping above 50%
+                                    val factor = when {
+                                        volumePercent <= 50 -> 1.0f
+                                        volumePercent <= 100 -> {
+                                            1.0f - (volumePercent - 50) / 50f * 0.6f // linear down to 0.4
+                                        }
+                                        else -> {
+                                            0.4f - (volumePercent - 100) / 100f * 0.3f // linear down to 0.1
+                                        }
+                                    }
+                                    
+                                    val dampedDelta = rawDeltaPercent * factor
+                                    volumeAccumulator += dampedDelta
                                     val actualDelta = volumeAccumulator.toInt()
+                                    
                                     if (actualDelta != 0) {
                                         volumeAccumulator -= actualDelta.toFloat()
-                                        val newVol = (currentVol + actualDelta).coerceIn(0, maxVolume)
-                                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVol, 0)
-                                        val pct = (newVol.toFloat() / maxVolume * 100).toInt()
+                                        val newVolPercent = (volumePercent + actualDelta).coerceIn(0, 200)
+                                        volumePercent = newVolPercent
+                                        
+                                        // Set hardware system volume (max out at 100%)
+                                        if (newVolPercent <= 100) {
+                                            val targetSysVol = (newVolPercent / 100f * maxVolume).toInt()
+                                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetSysVol, 0)
+                                        } else {
+                                            if (maxVolume > 0) {
+                                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxVolume, 0)
+                                            }
+                                        }
+                                        
+                                        // Call callback for software volume boost
+                                        currentOnVolumePercentChange(newVolPercent)
+                                        
+                                        val isBoosted = newVolPercent > 100
                                         triggerIndicator(
-                                            icon = if (newVol == 0) Icons.AutoMirrored.Filled.VolumeMute
-                                                   else if (pct < 50) Icons.AutoMirrored.Filled.VolumeDown
-                                                   else Icons.AutoMirrored.Filled.VolumeUp,
-                                            text = "$pct%"
+                                            icon = when {
+                                                newVolPercent == 0 -> Icons.AutoMirrored.Filled.VolumeMute
+                                                newVolPercent < 50 -> Icons.AutoMirrored.Filled.VolumeDown
+                                                else -> Icons.AutoMirrored.Filled.VolumeUp
+                                            },
+                                            text = if (isBoosted) "音量倍增: $newVolPercent%" else "$newVolPercent%"
                                         )
                                     }
                                 }
@@ -361,6 +408,11 @@ fun PlayerGestureOverlay(
             exit = fadeOut() + scaleOut(),
             modifier = Modifier.align(Alignment.Center)
         ) {
+            val pctDigits = indicatorText.filter { it.isDigit() }.toIntOrNull()
+            val pct = pctDigits
+            val isVolumeBoosted = pct != null && pct > 100 && (indicatorText.contains("倍增") || indicatorText.contains("Boost"))
+            val tintColor = if (isVolumeBoosted) Color(0xFFFF5722) else SecondaryNeonCyan
+
             Column(
                 modifier = Modifier
                     .clip(RoundedCornerShape(16.dp))
@@ -372,7 +424,7 @@ fun PlayerGestureOverlay(
                 Icon(
                     imageVector = indicatorIcon,
                     contentDescription = null,
-                    tint = SecondaryNeonCyan,
+                    tint = tintColor,
                     modifier = Modifier.size(36.dp)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -383,17 +435,20 @@ fun PlayerGestureOverlay(
                     fontWeight = FontWeight.Bold
                 )
 
-                // Parse percentage for volume or brightness
-                val pct = indicatorText.removeSuffix("%").toIntOrNull()
                 if (pct != null) {
+                    val progressVal = if (isVolumeBoosted || indicatorText.contains("音量") && pct <= 100) {
+                        pct / 200f // Show out of 200% for volume
+                    } else {
+                        pct / 100f // Show out of 100% for brightness
+                    }
                     Spacer(modifier = Modifier.height(8.dp))
                     LinearProgressIndicator(
-                        progress = { pct / 100f },
+                        progress = { progressVal.coerceIn(0f, 1f) },
                         modifier = Modifier
                             .width(80.dp)
                             .height(4.dp)
                             .clip(RoundedCornerShape(2.dp)),
-                        color = SecondaryNeonCyan,
+                        color = tintColor,
                         trackColor = Color.White.copy(alpha = 0.2f)
                     )
                 }
