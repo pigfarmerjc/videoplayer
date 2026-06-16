@@ -1,0 +1,4 @@
+﻿<resources>
+    <string name="app_name">BlackCatPlayer</string>
+    <string name="permission_rationale">BlackCatPlayer 需要访问本机和 TF 卡中的视频、音频、图片文件。</string>
+</resources>

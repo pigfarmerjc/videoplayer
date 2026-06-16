@@ -1,0 +1,22 @@
+# Gradle build outputs and cache
+.gradle/
+build/
+app/build/
+
+# IDE configurations
+.idea/
+*.iml
+local.properties
+
+# Android binaries
+*.apk
+*.aar
+
+# Temporary and debug artifacts generated in root
+/main_chunk_*.txt
+/main_extracted_*.txt
+/step_extracted_*.txt
+/all_chunks.json
+/screen*.png
+/screenshot.png
+/window_*.xml
