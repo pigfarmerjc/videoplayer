@@ -25,6 +25,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -317,8 +319,11 @@ class FloatingPlayerService : Service() {
                     FloatingPlayerManager.width = newW
                     FloatingPlayerManager.height = newH
                 } else if (isDragging) {
-                    lp.x = touchDownWindowX + dx
-                    lp.y = touchDownWindowY + dy
+                    val dm = resources.displayMetrics
+                    val maxX = dm.widthPixels - lp.width
+                    val maxY = dm.heightPixels - lp.height
+                    lp.x = (touchDownWindowX + dx).coerceIn(0, maxX.coerceAtLeast(0))
+                    lp.y = (touchDownWindowY + dy).coerceIn(0, maxY.coerceAtLeast(0))
                     safeUpdateLayout(lp)
                     FloatingPlayerManager.x = lp.x
                     FloatingPlayerManager.y = lp.y
@@ -602,8 +607,15 @@ class FloatingPlayerService : Service() {
             .setBufferDurationsMs(minBuffer, maxBuffer, playBuffer, rebufferBuffer)
             .build()
 
+        val audioAttrs = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
+
         val player = ExoPlayer.Builder(applicationContext)
             .setRenderersFactory(renderersFactory)
+            .setAudioAttributes(audioAttrs, /* handleAudioFocus= */ true)
+            .setHandleAudioBecomingNoisy(true)
             .setLoadControl(loadControl)
             .setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC)
             .build()
@@ -823,10 +835,10 @@ class FloatingPlayerService : Service() {
                     progressBar?.progress = ((pos * 100) / dur).toInt()
                 }
                 FloatingPlayerManager.currentPosition = pos
-                mainHandler.postDelayed(this, 1000)
+                mainHandler.postDelayed(this, 500)
             }
         }.also {
-            mainHandler.postDelayed(it, 1000)
+            mainHandler.postDelayed(it, 500)
         }
     }
 
