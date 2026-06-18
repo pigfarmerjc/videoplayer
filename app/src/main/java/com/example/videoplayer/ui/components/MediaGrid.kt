@@ -49,7 +49,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.Spring
 import androidx.compose.ui.graphics.graphicsLayer
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
@@ -92,8 +91,8 @@ fun MediaItemCard(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.975f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -290,8 +289,8 @@ fun MediaGridTile(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.95f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.965f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -462,8 +461,8 @@ fun FolderCard(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.975f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -541,8 +540,8 @@ fun FolderGridTile(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.95f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.965f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -976,7 +975,7 @@ object VideoThumbnailCache : android.content.ComponentCallbacks2 {
             val resolution = if (w > 0 && h > 0) "${w}x${h}" else ""
             
             if (dur > 0L || resolution.isNotBlank()) {
-                val repository = MediaRepository(context)
+                val repository = MediaRepository(context.applicationContext)
                 repository.saveMetadata(item, dur, resolution)
             }
         } catch (e: Exception) {

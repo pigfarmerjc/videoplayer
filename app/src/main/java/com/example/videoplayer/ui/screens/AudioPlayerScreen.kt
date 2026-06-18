@@ -83,7 +83,8 @@ fun AudioPlayerScreen(
 
     // Sleep Timer state
     var sleepTimerSecondsLeft by remember { mutableIntStateOf(0) }
-    LaunchedEffect(sleepTimerSecondsLeft, isPlaying) {
+    var sleepTimerVersion by remember { mutableIntStateOf(0) }
+    LaunchedEffect(sleepTimerVersion, isPlaying) {
         if (sleepTimerSecondsLeft > 0 && isPlaying) {
             while (sleepTimerSecondsLeft > 0 && isPlaying) {
                 delay(1000L)
@@ -158,12 +159,9 @@ fun AudioPlayerScreen(
             }
         } finally {
             exoPlayer.removeListener(listener)
+            if (player === exoPlayer) player = null
             exoPlayer.release()
         }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose { player?.release() }
     }
 
     Box(
@@ -382,6 +380,7 @@ fun AudioPlayerScreen(
                         TextButton(
                             onClick = {
                                 sleepTimerSecondsLeft = mins * 60
+                                sleepTimerVersion++
                                 showTimerDialog = false
                             },
                             modifier = Modifier.fillMaxWidth()

@@ -38,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -56,6 +57,7 @@ import com.example.videoplayer.data.repository.MediaRepository
 import com.example.videoplayer.ui.components.FolderCard
 import com.example.videoplayer.ui.components.FolderGridTile
 import com.example.videoplayer.ui.components.GlassmorphicCard
+import com.example.videoplayer.ui.components.AppBackground
 import com.example.videoplayer.ui.components.MediaGridTile
 import com.example.videoplayer.ui.components.MediaItemCard
 import com.example.videoplayer.ui.components.mediaPreviewRequest
@@ -275,7 +277,7 @@ fun MainScreen(
     Scaffold(
         containerColor = CarbonBg
     ) { paddingValues ->
-        Box(
+        AppBackground(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
@@ -798,7 +800,7 @@ fun GlassmorphicBottomNavBar(
 ) {
     Box(
         modifier = modifier
-            .padding(horizontal = 24.dp, vertical = 18.dp)
+            .padding(horizontal = 20.dp, vertical = 16.dp)
             .fillMaxWidth()
             .height(66.dp)
             .shadow(
@@ -848,15 +850,23 @@ fun GlassmorphicBottomNavBar(
 
 @Composable
 fun NavBarItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: () -> Unit) {
-    val tintColor = if (isSelected) SecondaryNeonCyan else TextMuted
-    val isSelectedPillAlpha = if (isSelected) 0.12f else 0.0f
+    val selectionProgress by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = tween(durationMillis = 220),
+        label = "navSelection"
+    )
+    val tintColor = androidx.compose.ui.graphics.lerp(TextMuted, SecondaryNeonCyan, selectionProgress)
     
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
-            .background(SecondaryNeonCyan.copy(alpha = isSelectedPillAlpha))
+            .background(SecondaryNeonCyan.copy(alpha = 0.16f * selectionProgress))
+            .graphicsLayer {
+                scaleX = 1f + 0.04f * selectionProgress
+                scaleY = 1f + 0.04f * selectionProgress
+            }
             .clickable { onClick() }
             .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {

@@ -43,6 +43,7 @@ import com.example.videoplayer.ui.components.MediaGridTile
 import com.example.videoplayer.ui.components.MediaItemCard
 import com.example.videoplayer.ui.components.folderDisplayName
 import com.example.videoplayer.ui.components.GlassmorphicCard
+import com.example.videoplayer.ui.components.AppBackground
 import com.example.videoplayer.ui.theme.CarbonBg
 import com.example.videoplayer.ui.theme.CarbonBorder
 import com.example.videoplayer.ui.theme.SecondaryNeonCyan
@@ -218,7 +219,7 @@ fun FolderDetailScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = CarbonBg
     ) { paddingValues ->
-        Box(
+        AppBackground(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)

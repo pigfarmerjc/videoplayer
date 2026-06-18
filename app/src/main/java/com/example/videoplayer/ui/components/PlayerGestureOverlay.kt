@@ -55,6 +55,7 @@ fun PlayerGestureOverlay(
     content: @Composable BoxScope.() -> Unit
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { findActivity(context) }
     val scope = rememberCoroutineScope()
 
     // Audio Manager for volume adjust
@@ -82,17 +83,21 @@ fun PlayerGestureOverlay(
     var showPullDownHint by remember { mutableStateOf(false) }
 
     // Hide gesture indicators after some time
-    var indicatorJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val indicatorJob = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
 
-    fun triggerIndicator(icon: ImageVector, text: String) {
-        indicatorIcon = icon
-        indicatorText = text
-        showIndicator = true
-        indicatorJob?.cancel()
-        indicatorJob = scope.launch {
+    fun hideIndicatorLater() {
+        indicatorJob[0]?.cancel()
+        indicatorJob[0] = scope.launch {
             delay(1000)
             showIndicator = false
         }
+    }
+
+    fun triggerIndicator(icon: ImageVector, text: String, autoHide: Boolean = true) {
+        indicatorIcon = icon
+        indicatorText = text
+        showIndicator = true
+        if (autoHide) hideIndicatorLater()
     }
 
     val currentIsLocked by rememberUpdatedState(isLocked)
@@ -199,7 +204,6 @@ fun PlayerGestureOverlay(
                                 volumePercent = if (maxVolume > 0) (currentVol.toFloat() / maxVolume * 100).toInt() else 100
                             }
 
-                            val activity = findActivity(context)
                             val lp = activity?.window?.attributes
                             val currentBrightness = lp?.screenBrightness ?: -1f
                             gestureBrightness = if (currentBrightness < 0f) {
@@ -224,6 +228,7 @@ fun PlayerGestureOverlay(
                                     currentOnPullDownRelease(totalDragY)
                                 }
                             }
+                            if (dragType in 2..4) hideIndicatorLater()
                         }
                     },
                     onDragCancel = {
@@ -235,6 +240,7 @@ fun PlayerGestureOverlay(
                                     currentOnPullDownRelease(0f)
                                 }
                             }
+                            if (dragType in 2..4) hideIndicatorLater()
                         }
                     },
                     onDrag = { change, dragAmount ->
@@ -266,7 +272,11 @@ fun PlayerGestureOverlay(
                                     if (dragType == 4) {
                                         scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
                                         currentOnScrub(scrubTarget)
-                                        triggerIndicator(Icons.Default.SlowMotionVideo, formatGestureDuration(scrubTarget))
+                                        triggerIndicator(
+                                            Icons.Default.SlowMotionVideo,
+                                            formatGestureDuration(scrubTarget),
+                                            autoHide = false
+                                        )
                                     }
                                 }
                                 // ── 竖直滑动：左侧=亮度，右侧=音量，中间=忽略 ──
@@ -286,7 +296,6 @@ fun PlayerGestureOverlay(
                                     // 亮度调节：直接累积，避免每帧读 window.attributes
                                     val delta = -dragAmount.y / screenHeight.toFloat()
                                     gestureBrightness = (gestureBrightness + delta).coerceIn(0.01f, 1f)
-                                    val activity = findActivity(context)
                                     activity?.let {
                                         val layoutParams = it.window.attributes
                                         layoutParams.screenBrightness = gestureBrightness
@@ -298,7 +307,8 @@ fun PlayerGestureOverlay(
                                                 pct < 70 -> Icons.Default.BrightnessMedium
                                                 else -> Icons.Default.BrightnessHigh
                                             },
-                                            text = "$pct%"
+                                            text = "$pct%",
+                                            autoHide = false
                                         )
                                     }
                                 }
@@ -347,7 +357,8 @@ fun PlayerGestureOverlay(
                                                 newVolPercent < 50 -> Icons.AutoMirrored.Filled.VolumeDown
                                                 else -> Icons.AutoMirrored.Filled.VolumeUp
                                             },
-                                            text = if (isBoosted) "音量倍增: $newVolPercent%" else "$newVolPercent%"
+                                            text = if (isBoosted) "音量倍增: $newVolPercent%" else "$newVolPercent%",
+                                            autoHide = false
                                         )
                                     }
                                 }
@@ -355,7 +366,11 @@ fun PlayerGestureOverlay(
                                 4 -> {
                                     scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
                                     currentOnScrub(scrubTarget)
-                                    triggerIndicator(Icons.Default.SlowMotionVideo, formatGestureDuration(scrubTarget))
+                                    triggerIndicator(
+                                        Icons.Default.SlowMotionVideo,
+                                        formatGestureDuration(scrubTarget),
+                                        autoHide = false
+                                    )
                                 }
 
                                 5 -> {

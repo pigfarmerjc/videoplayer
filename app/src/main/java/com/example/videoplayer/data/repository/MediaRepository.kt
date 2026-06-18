@@ -245,8 +245,9 @@ class MediaRepository(private val context: Context) {
 
     fun markWatched(item: MediaItem) {
         synchronized(this) {
-            val next = watchedKeys().toMutableSet()
-            next.add(item.uniqueKey)
+            val current = watchedKeys()
+            if (item.uniqueKey in current) return
+            val next = current.toMutableSet().apply { add(item.uniqueKey) }
             cachedWatchedKeys = next
             prefs.edit().putStringSet("watched_keys", next).apply()
         }
@@ -366,6 +367,20 @@ class MediaRepository(private val context: Context) {
     fun getPlaybackPosition(item: MediaItem): Long = prefs.getLong("progress:${item.uniqueKey}", 0L)
 
     fun getPlaybackDuration(item: MediaItem): Long = prefs.getLong("duration:${item.uniqueKey}", item.duration)
+
+    fun getProjectionMode(item: MediaItem): String? =
+        prefs.getString("projection_mode:${item.uniqueKey}", null)
+
+    fun setProjectionMode(item: MediaItem, mode: String) {
+        prefs.edit().putString("projection_mode:${item.uniqueKey}", mode).apply()
+    }
+
+    fun isProjectionSensorEnabled(item: MediaItem): Boolean =
+        prefs.getBoolean("projection_sensor:${item.uniqueKey}", true)
+
+    fun setProjectionSensorEnabled(item: MediaItem, enabled: Boolean) {
+        prefs.edit().putBoolean("projection_sensor:${item.uniqueKey}", enabled).apply()
+    }
 
     fun getPlaybackProgressFraction(item: MediaItem): Float {
         val duration = prefs.getLong("duration:${item.uniqueKey}", item.duration).coerceAtLeast(0L)

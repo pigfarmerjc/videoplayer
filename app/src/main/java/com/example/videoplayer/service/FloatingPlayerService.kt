@@ -523,6 +523,7 @@ class FloatingPlayerService : Service() {
 
     private fun initializePlayer() {
         val currentItem = FloatingPlayerManager.playlist.getOrNull(FloatingPlayerManager.currentIndex) ?: return
+        releasePlayer()
         titleText?.text = currentItem.displayName
 
         val oldAspectRatio = aspectRatio
