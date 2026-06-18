@@ -40,6 +40,13 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.PictureInPicture
@@ -230,6 +237,14 @@ fun VideoPlayerScreen(
     var isExitingScreen by remember { mutableStateOf(false) }
     // 下拉关闭的垂直位移（px），用于视差动画
     var pullDownOffsetPx by remember { mutableFloatStateOf(0f) }
+
+    // Pinch-to-zoom & Pan states
+    var zoomScale by remember { mutableFloatStateOf(1.0f) }
+    var zoomOffsetX by remember { mutableFloatStateOf(0f) }
+    var zoomOffsetY by remember { mutableFloatStateOf(0f) }
+
+    // 4K playback startup stabilization state
+    var isFirstPlayPending by remember { mutableStateOf(true) }
 
     val scope = rememberCoroutineScope()
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -915,6 +930,10 @@ fun VideoPlayerScreen(
                         if (state == Player.STATE_READY) {
                             duration = exoPlayer.duration.coerceAtLeast(0L)
                             playerReadyFlow.tryEmit(Unit)
+                            if (isFirstPlayPending) {
+                                isFirstPlayPending = false
+                                exoPlayer.playWhenReady = true
+                            }
                         }
                         if (state == Player.STATE_ENDED) {
                             repository.markWatched(latestCurrentVideo)
@@ -1009,9 +1028,10 @@ fun VideoPlayerScreen(
         p.seekTo(startPos)
         currentPosition = startPos
         
+        isFirstPlayPending = true
         p.prepare()
         p.setPlaybackSpeed(latestPlaybackSpeed)
-        p.playWhenReady = true
+        p.playWhenReady = false
     }
 
     // Periodically save playback progress for both ExoPlayer and VLC.
@@ -1117,7 +1137,7 @@ fun VideoPlayerScreen(
             seekSeconds = skipSeconds,
             durationMs = duration,
             currentPositionMs = currentPosition,
-            isLocked = isScreenLocked,
+            isLocked = isScreenLocked || (zoomScale > 1.0f),
             isEnabled = !MainActivity.isInPipMode.value,
             onSingleTap = { showControls = !showControls },
             onCenterDoubleTap = { togglePlayPause() },
@@ -1205,7 +1225,87 @@ fun VideoPlayerScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .alpha(if (isExitingScreen && pullDownOffsetPx == 0f) exitAlpha else 1f)
-                    .graphicsLayer { translationX = swipeOffsetAnim.value }
+                    .pointerInput(zoomScale, isScreenLocked, isExitingScreen) {
+                        if (isScreenLocked || isExitingScreen) return@pointerInput
+                        if (zoomScale > 1.0f) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    zoomScale = 1.0f
+                                    zoomOffsetX = 0f
+                                    zoomOffsetY = 0f
+                                },
+                                onTap = { showControls = !showControls }
+                            )
+                        }
+                    }
+                    .pointerInput(zoomScale, isScreenLocked, isExitingScreen) {
+                        if (isScreenLocked || isExitingScreen) return@pointerInput
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var maxPointers = 1
+                            var pastSlop = false
+                            var zoom = 1f
+                            var pan = Offset.Zero
+                            val touchSlop = viewConfiguration.touchSlop
+                            do {
+                                val event = awaitPointerEvent()
+                                val pointerCount = event.changes.filter { it.pressed }.size
+                                if (pointerCount > maxPointers) {
+                                    maxPointers = pointerCount
+                                }
+                                
+                                val canceled = event.changes.any { it.isConsumed }
+                                if (!canceled) {
+                                    val zoomChange = event.calculateZoom()
+                                    val panChange = event.calculatePan()
+                                    
+                                    val isMultiTouch = pointerCount >= 2 || maxPointers >= 2
+                                    val shouldHandle = (zoomScale > 1.0f) || isMultiTouch
+                                    
+                                    if (shouldHandle) {
+                                        if (!pastSlop) {
+                                            zoom *= zoomChange
+                                            pan += panChange
+                                            val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                                            val zoomMotion = abs(1 - zoom) * centroidSize
+                                            val panMotion = pan.getDistance()
+                                            
+                                            if (zoomMotion > touchSlop || panMotion > touchSlop || isMultiTouch) {
+                                                pastSlop = true
+                                            }
+                                        }
+                                        
+                                        if (pastSlop) {
+                                            val newScale = (zoomScale * zoomChange).coerceIn(1.0f, 4.0f)
+                                            zoomScale = newScale
+                                            
+                                            if (zoomScale > 1.0f) {
+                                                val maxOffsetX = (size.width * (zoomScale - 1f)) / 2f
+                                                val maxOffsetY = (size.height * (zoomScale - 1f)) / 2f
+                                                zoomOffsetX = (zoomOffsetX + panChange.x * zoomScale).coerceIn(-maxOffsetX, maxOffsetX)
+                                                zoomOffsetY = (zoomOffsetY + panChange.y * zoomScale).coerceIn(-maxOffsetY, maxOffsetY)
+                                            } else {
+                                                zoomOffsetX = 0f
+                                                zoomOffsetY = 0f
+                                            }
+                                            
+                                            event.changes.forEach {
+                                                if (it.positionChanged()) {
+                                                    it.consume()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } while (event.changes.any { it.pressed })
+                        }
+                    }
+                    .graphicsLayer {
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        translationX = swipeOffsetAnim.value + zoomOffsetX
+                        translationY = zoomOffsetY
+                    }
             ) {
                 if (useVlcFallback) {
                     VlcPlayerSurface(
@@ -1576,6 +1676,39 @@ fun VideoPlayerScreen(
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        // 顶端无级缩放比例 HUD
+        AnimatedVisibility(
+            visible = zoomScale > 1.0f,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 70.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.Black.copy(alpha = 0.8f))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ZoomIn,
+                        contentDescription = null,
+                        tint = SecondaryNeonCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = "缩放: ${String.format("%.1f", zoomScale)}x (双击重置)",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
