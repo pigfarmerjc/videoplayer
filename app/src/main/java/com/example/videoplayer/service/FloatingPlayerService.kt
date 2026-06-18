@@ -917,6 +917,7 @@ class FloatingPlayerService : Service() {
             floatingView = null
         }
         FloatingPlayerManager.isFloating = false
+        MainActivity.isVideoPlaying = false
         super.onDestroy()
     }
 }

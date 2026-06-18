@@ -21,6 +21,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.navigation.NavHostController
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.unit.IntOffset
@@ -44,6 +45,7 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var repository: MediaRepository
     private val pendingRestoreState = mutableStateOf(false)
+    private var navController: NavHostController? = null
 
     private val pipReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: Intent?) {
@@ -79,6 +81,7 @@ class MainActivity : ComponentActivity() {
                     color = ObsidianBg
                 ) {
                     val navController = rememberNavController()
+                    this@MainActivity.navController = navController
                     
                     // Restore from floating player if active
                     androidx.compose.runtime.LaunchedEffect(navController, pendingRestoreState.value) {
@@ -394,7 +397,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (isVideoPlaying && repository.isPipEnabled()) {
+        val currentRoute = navController?.currentBackStackEntry?.destination?.route
+        val isPlayerScreenActive = currentRoute?.startsWith("video") == true
+        if (isPlayerScreenActive && isVideoPlaying && repository.isPipEnabled()) {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M &&
                 android.provider.Settings.canDrawOverlays(this)
             ) {
