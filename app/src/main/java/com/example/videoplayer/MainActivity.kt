@@ -9,8 +9,11 @@ import android.net.Uri
 import com.example.videoplayer.service.FloatingPlayerService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,6 +86,9 @@ class MainActivity : ComponentActivity() {
                     val navController = rememberNavController()
                     this@MainActivity.navController = navController
                     
+                    var activeVideoItemId by rememberSaveable { mutableStateOf<Long?>(null) }
+                    var activeVideoFolderName by rememberSaveable { mutableStateOf<String?>(null) }
+
                     // Restore from floating player if active
                     androidx.compose.runtime.LaunchedEffect(navController, pendingRestoreState.value) {
                         if (pendingRestoreState.value || FloatingPlayerManager.isFloating) {
@@ -93,8 +99,9 @@ class MainActivity : ComponentActivity() {
                                 // Stop the floating service
                                 val serviceIntent = Intent(applicationContext, FloatingPlayerService::class.java)
                                 stopService(serviceIntent)
-                                // Navigate to video player screen
-                                navController.navigate("video/${currentItem.id}/${Uri.encode(currentItem.folderName)}")
+                                // Show video player overlay
+                                activeVideoItemId = currentItem.id
+                                activeVideoFolderName = currentItem.folderName
                             }
                         }
                     }
@@ -108,10 +115,11 @@ class MainActivity : ComponentActivity() {
                     val fadeTween = tween<Float>(durationMillis = 350)
                     val scaleTween = tween<Float>(durationMillis = 300)
 
-                    NavHost(
-                        navController = navController,
-                        startDestination = "main"
-                    ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        NavHost(
+                            navController = navController,
+                            startDestination = "main"
+                        ) {
                         // Main Tabbed Dashboard Screen
                         composable(
                             route = "main",
@@ -134,7 +142,8 @@ class MainActivity : ComponentActivity() {
                                     navController.navigate("folder/${Uri.encode(folderName)}")
                                 },
                                 onNavigateToVideo = { itemId, folderName ->
-                                    navController.navigate("video/$itemId/${Uri.encode(folderName)}")
+                                    activeVideoItemId = itemId
+                                    activeVideoFolderName = folderName
                                 },
                                 onNavigateToAudio = { itemId, folderName ->
                                     navController.navigate("audio/$itemId/${Uri.encode(folderName)}")
@@ -198,7 +207,8 @@ class MainActivity : ComponentActivity() {
                                 repository = repository,
                                 onBackClick = { navController.popBackStack() },
                                 onNavigateToVideo = { itemId, fName ->
-                                    navController.navigate("video/$itemId/${Uri.encode(fName)}")
+                                    activeVideoItemId = itemId
+                                    activeVideoFolderName = fName
                                 },
                                 onNavigateToAudio = { itemId, fName ->
                                     navController.navigate("audio/$itemId/${Uri.encode(fName)}")
@@ -209,36 +219,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // Immersive Video Screen (Wraps Media3 Player - Apple TV fade & scale style)
-                        composable(
-                            route = "video/{itemId}/{folderName}",
-                            arguments = listOf(
-                                navArgument("itemId") { type = NavType.LongType },
-                                navArgument("folderName") { type = NavType.StringType }
-                            ),
-                            enterTransition = {
-                                fadeIn(animationSpec = fadeTween) + scaleIn(initialScale = 0.94f, animationSpec = scaleTween)
-                            },
-                            exitTransition = {
-                                fadeOut(animationSpec = fadeTween) + scaleOut(targetScale = 0.94f, animationSpec = scaleTween)
-                            },
-                            popEnterTransition = {
-                                fadeIn(animationSpec = fadeTween)
-                            },
-                            popExitTransition = {
-                                fadeOut(animationSpec = fadeTween) + scaleOut(targetScale = 0.94f, animationSpec = scaleTween)
-                            }
-                        ) { backStackEntry ->
-                            val itemId = backStackEntry.arguments?.getLong("itemId") ?: 0L
-                            val folderName = backStackEntry.arguments?.getString("folderName") ?: ""
-                            VideoPlayerScreen(
-                                itemId = itemId,
-                                folderName = folderName,
-                                mediaItems = mediaItemsState.value,
-                                repository = repository,
-                                onBackClick = { navController.popBackStack() }
-                            )
-                        }
+
 
                         // Futuristic Equalized Audio Screen (Fade & Scale)
                         composable(
@@ -302,7 +283,23 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
-                }
+
+                    val itemId = activeVideoItemId
+                    val folderName = activeVideoFolderName
+                    if (itemId != null && folderName != null) {
+                        VideoPlayerScreen(
+                            itemId = itemId,
+                            folderName = folderName,
+                            mediaItems = mediaItemsState.value,
+                            repository = repository,
+                            onBackClick = {
+                                activeVideoItemId = null
+                                activeVideoFolderName = null
+                            }
+                        )
+                    }
+                } // Closes Box
+            } // Closes Surface
             }
         }
     }

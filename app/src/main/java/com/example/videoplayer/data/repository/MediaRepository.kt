@@ -8,6 +8,7 @@ import android.provider.MediaStore
 import com.example.videoplayer.data.model.MediaFolder
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.model.MediaType
+import com.example.videoplayer.data.model.LayoutMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
@@ -303,6 +304,42 @@ class MediaRepository(private val context: Context) {
 
     fun setVideoGridModeEnabled(enabled: Boolean) {
         prefs.edit().putBoolean("video_grid_mode", enabled).apply()
+    }
+
+    fun getVideoLayoutMode(): LayoutMode {
+        val modeOrdinal = prefs.getInt("video_layout_mode_v2", -1)
+        if (modeOrdinal != -1) {
+            return LayoutMode.entries.getOrNull(modeOrdinal) ?: LayoutMode.LIST
+        }
+        val oldGrid = prefs.getBoolean("video_grid_mode", false)
+        return if (oldGrid) LayoutMode.GRID else LayoutMode.LIST
+    }
+
+    fun setVideoLayoutMode(mode: LayoutMode) {
+        prefs.edit().putInt("video_layout_mode_v2", mode.ordinal).apply()
+        prefs.edit().putBoolean("video_grid_mode", mode == LayoutMode.GRID).apply()
+    }
+
+    fun getFolderLayoutMode(): LayoutMode {
+        val modeOrdinal = prefs.getInt("folder_layout_mode_v2", -1)
+        if (modeOrdinal != -1) {
+            return LayoutMode.entries.getOrNull(modeOrdinal) ?: LayoutMode.GRID
+        }
+        val oldGrid = prefs.getBoolean("folder_grid_mode", true)
+        return if (oldGrid) LayoutMode.GRID else LayoutMode.LIST
+    }
+
+    fun setFolderLayoutMode(mode: LayoutMode) {
+        prefs.edit().putInt("folder_layout_mode_v2", mode.ordinal).apply()
+        prefs.edit().putBoolean("folder_grid_mode", mode == LayoutMode.GRID).apply()
+    }
+
+    fun getGalleryColumnCount(): Int {
+        return prefs.getInt("gallery_column_count", 4).coerceIn(2, 12)
+    }
+
+    fun setGalleryColumnCount(count: Int) {
+        prefs.edit().putInt("gallery_column_count", count.coerceIn(2, 12)).apply()
     }
 
     fun isAudioGridModeEnabled(): Boolean = prefs.getBoolean("audio_grid_mode", false)

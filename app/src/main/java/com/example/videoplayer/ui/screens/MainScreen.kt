@@ -54,6 +54,12 @@ import com.example.videoplayer.data.model.MediaFolder
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.data.repository.MediaRepository
+import com.example.videoplayer.data.model.LayoutMode
+import com.example.videoplayer.ui.components.MediaGalleryTile
+import androidx.compose.material.icons.filled.Collections
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
 import com.example.videoplayer.ui.components.FolderCard
 import com.example.videoplayer.ui.components.FolderGridTile
 import com.example.videoplayer.ui.components.GlassmorphicCard
@@ -117,7 +123,8 @@ fun MainScreen(
 
     // 网格/列表模式（文件夹、视频 & 音频 Tab 独立保存）
     var folderGridMode by remember { mutableStateOf(repository.isMainFolderGridModeEnabled()) }
-    var videoGridMode by remember { mutableStateOf(repository.isVideoGridModeEnabled()) }
+    var videoLayoutMode by remember { mutableStateOf(repository.getVideoLayoutMode()) }
+    var videoGalleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
     var audioGridMode by remember { mutableStateOf(repository.isAudioGridModeEnabled()) }
     // 视频网格尺寸档位: 140=小, 220=中, 320=大
     var videoGridSizeDp by remember { mutableIntStateOf(repository.getVideoGridSize()) }
@@ -301,15 +308,15 @@ fun MainScreen(
                         repository.setWatchedLastEnabled(it)
                     },
                     // 仅文件夹/视频/音频 Tab 显示网格切换按钮
-                    showGridToggle = selectedTab == 0 || selectedTab == 1 || selectedTab == 2,
-                    isGridMode = when (selectedTab) {
-                        0 -> folderGridMode
-                        1 -> videoGridMode
-                        2 -> audioGridMode
-                        else -> false
+                    showLayoutToggle = selectedTab == 0 || selectedTab == 1 || selectedTab == 2,
+                    currentLayoutMode = when (selectedTab) {
+                        0 -> if (folderGridMode) LayoutMode.GRID else LayoutMode.LIST
+                        1 -> videoLayoutMode
+                        2 -> if (audioGridMode) LayoutMode.GRID else LayoutMode.LIST
+                        else -> LayoutMode.LIST
                     },
-                    showSizeToggle = (selectedTab == 1 || selectedTab == 2) && when (selectedTab) {
-                        1 -> videoGridMode
+                    showSizeToggle = when (selectedTab) {
+                        1 -> videoLayoutMode == LayoutMode.GRID
                         2 -> audioGridMode
                         else -> false
                     },
@@ -318,15 +325,19 @@ fun MainScreen(
                         videoGridSizeDp = size
                         repository.setVideoGridSize(size)
                     },
-                    onGridToggle = {
+                    onLayoutModeToggle = {
                         when (selectedTab) {
                             0 -> {
                                 folderGridMode = !folderGridMode
                                 repository.setMainFolderGridModeEnabled(folderGridMode)
                             }
                             1 -> {
-                                videoGridMode = !videoGridMode
-                                repository.setVideoGridModeEnabled(videoGridMode)
+                                videoLayoutMode = when (videoLayoutMode) {
+                                    LayoutMode.LIST -> LayoutMode.GRID
+                                    LayoutMode.GRID -> LayoutMode.GALLERY
+                                    LayoutMode.GALLERY -> LayoutMode.LIST
+                                }
+                                repository.setVideoLayoutMode(videoLayoutMode)
                             }
                             2 -> {
                                 audioGridMode = !audioGridMode
@@ -353,19 +364,37 @@ fun MainScreen(
                             } else {
                                 FolderList(filteredFolders, onNavigateToFolder)
                             }
-                            1 -> if (videoGridMode) {
-                                MediaGridView(
-                                    items = filteredVideos,
-                                    folderName = MediaRepository.ALL_VIDEOS,
-                                    progressSnapshot = progressSnapshot,
-                                    repository = repository,
-                                    gridSizeDp = videoGridSizeDp,
-                                    onNavigateToVideo = onNavigateToVideo,
-                                    onNavigateToAudio = onNavigateToAudio,
-                                    onNavigateToPhoto = onNavigateToPhoto
-                                )
-                            } else {
-                                MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
+                            1 -> when (videoLayoutMode) {
+                                LayoutMode.LIST -> {
+                                    MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
+                                }
+                                LayoutMode.GRID -> {
+                                    MediaGridView(
+                                        items = filteredVideos,
+                                        folderName = MediaRepository.ALL_VIDEOS,
+                                        progressSnapshot = progressSnapshot,
+                                        repository = repository,
+                                        gridSizeDp = videoGridSizeDp,
+                                        onNavigateToVideo = onNavigateToVideo,
+                                        onNavigateToAudio = onNavigateToAudio,
+                                        onNavigateToPhoto = onNavigateToPhoto
+                                    )
+                                }
+                                LayoutMode.GALLERY -> {
+                                    MediaGalleryView(
+                                        items = filteredVideos,
+                                        folderName = MediaRepository.ALL_VIDEOS,
+                                        progressSnapshot = progressSnapshot,
+                                        columnsCount = videoGalleryColumns,
+                                        onColumnsChange = { cols ->
+                                            videoGalleryColumns = cols
+                                            repository.setGalleryColumnCount(cols)
+                                        },
+                                        onNavigateToVideo = onNavigateToVideo,
+                                        onNavigateToAudio = onNavigateToAudio,
+                                        onNavigateToPhoto = onNavigateToPhoto
+                                    )
+                                }
                             }
                             2 -> if (audioGridMode) {
                                 MediaGridView(
@@ -500,9 +529,9 @@ private fun SortToolbar(
     onSortModeChange: (SortMode) -> Unit,
     watchedLast: Boolean,
     onWatchedLastChange: (Boolean) -> Unit,
-    showGridToggle: Boolean = false,
-    isGridMode: Boolean = false,
-    onGridToggle: () -> Unit = {},
+    showLayoutToggle: Boolean = false,
+    currentLayoutMode: LayoutMode = LayoutMode.LIST,
+    onLayoutModeToggle: () -> Unit = {},
     showSizeToggle: Boolean = false,
     currentGridSizeDp: Int = 220,
     onGridSizeChange: (Int) -> Unit = {}
@@ -548,9 +577,7 @@ private fun SortToolbar(
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // 网格/列表切换按钮（仅视频/音频 Tab 显示）
-            if (showGridToggle) {
-                // S/M/L 尺寸选择器（仅在网格模式下）
+            if (showLayoutToggle) {
                 if (showSizeToggle) {
                     val sizes = listOf(140 to "S", 220 to "M", 320 to "L")
                     sizes.forEach { (size, label) ->
@@ -581,17 +608,22 @@ private fun SortToolbar(
                     }
                     Spacer(Modifier.width(4.dp))
                 }
+                val isNotList = currentLayoutMode != LayoutMode.LIST
                 IconButton(
-                    onClick = onGridToggle,
+                    onClick = onLayoutModeToggle,
                     modifier = Modifier
                         .size(36.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (isGridMode) SecondaryNeonCyan.copy(alpha = 0.22f) else Color.Transparent)
+                        .background(if (isNotList) SecondaryNeonCyan.copy(alpha = 0.22f) else Color.Transparent)
                 ) {
                     Icon(
-                        imageVector = if (isGridMode) Icons.AutoMirrored.Filled.ViewList else Icons.Default.GridView,
-                        contentDescription = if (isGridMode) "切换到列表" else "切换到网格",
-                        tint = if (isGridMode) SecondaryNeonCyan else TextSecondary,
+                        imageVector = when (currentLayoutMode) {
+                            LayoutMode.LIST -> Icons.Default.GridView
+                            LayoutMode.GRID -> Icons.Default.Collections
+                            LayoutMode.GALLERY -> Icons.AutoMirrored.Filled.ViewList
+                        },
+                        contentDescription = "切换布局模式",
+                        tint = if (isNotList) SecondaryNeonCyan else TextSecondary,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -1024,5 +1056,112 @@ private fun AlienBlackCatIcon(
             close()
         }
         drawPath(path = playPath, color = Color.White)
+    }
+}
+
+@Composable
+private fun MediaGalleryView(
+    items: List<MediaItem>,
+    folderName: String,
+    progressSnapshot: Map<String, Float>,
+    columnsCount: Int,
+    onColumnsChange: (Int) -> Unit,
+    onNavigateToVideo: (Long, String) -> Unit,
+    onNavigateToAudio: (Long, String) -> Unit,
+    onNavigateToPhoto: (Long, String) -> Unit
+) {
+    if (items.isEmpty()) {
+        EmptyStateView("暂无视频文件")
+    } else {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columnsCount),
+            verticalArrangement = Arrangement.spacedBy(1.5.dp),
+            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp),
+            modifier = Modifier.pinchToZoomColumns(
+                columns = columnsCount,
+                onColumnsChange = onColumnsChange
+            )
+        ) {
+            gridItems(
+                items,
+                key = { it.storageKey },
+                contentType = { it.type }
+            ) { item ->
+                MediaGalleryTile(
+                    item = item,
+                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+                    onClick = {
+                        when (item.type) {
+                            MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
+                            MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
+                            MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun Modifier.pinchToZoomColumns(
+    columns: Int,
+    onColumnsChange: (Int) -> Unit
+): Modifier {
+    val currentColumns by rememberUpdatedState(columns)
+    val currentOnChange by rememberUpdatedState(onColumnsChange)
+    return this.pointerInput(Unit) {
+        var scaleMultiplier = 1f
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false)
+            var lastDistance = 0f
+            var isPinching = false
+            
+            do {
+                val event = awaitPointerEvent()
+                val pointers = event.changes.filter { it.pressed }
+                if (pointers.size >= 2) {
+                    val p1 = pointers[0].position
+                    val p2 = pointers[1].position
+                    val dx = p1.x - p2.x
+                    val dy = p1.y - p2.y
+                    val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                    
+                    if (!isPinching) {
+                        lastDistance = dist
+                        isPinching = true
+                    } else {
+                        if (lastDistance > 0f && dist > 0f) {
+                            val ratio = dist / lastDistance
+                            scaleMultiplier *= ratio
+                            lastDistance = dist
+                            
+                            val cols = currentColumns
+                            if (scaleMultiplier > 1.3f) {
+                                if (cols > 2) {
+                                    currentOnChange(cols - 1)
+                                    scaleMultiplier = 1.0f
+                                } else {
+                                    scaleMultiplier = 1.3f
+                                }
+                                event.changes.forEach { it.consume() }
+                            } else if (scaleMultiplier < 0.7f) {
+                                if (cols < 12) {
+                                    currentOnChange(cols + 1)
+                                    scaleMultiplier = 1.0f
+                                } else {
+                                    scaleMultiplier = 0.7f
+                                }
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    }
+                } else {
+                    isPinching = false
+                    scaleMultiplier = 1f
+                }
+            } while (event.changes.any { it.pressed })
+        }
     }
 }

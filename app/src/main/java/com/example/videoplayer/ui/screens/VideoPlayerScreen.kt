@@ -248,8 +248,9 @@ fun VideoPlayerScreen(
     var isScreenLocked by remember { mutableStateOf(false) }
     var isWaitingForFirstFrame by remember { mutableStateOf(false) }
     var isExitingScreen by remember { mutableStateOf(false) }
-    // 下拉关闭的垂直位移（px），用于视差动画
-    var pullDownOffsetPx by remember { mutableFloatStateOf(0f) }
+    // 下拉关闭的偏移（px），用于视差动画
+    var pullDownOffsetX by remember { mutableFloatStateOf(0f) }
+    var pullDownOffsetY by remember { mutableFloatStateOf(0f) }
 
     // Pinch-to-zoom & Pan states
     val zoomScaleState = remember { mutableFloatStateOf(1.0f) }
@@ -789,7 +790,7 @@ fun VideoPlayerScreen(
     }
 
     LaunchedEffect(isExitingScreen) {
-        if (isExitingScreen && pullDownOffsetPx == 0f) {
+        if (isExitingScreen && pullDownOffsetX == 0f && pullDownOffsetY == 0f) {
             pauseCompat()
             markIfWatched()
             delay(280)
@@ -1154,27 +1155,53 @@ fun VideoPlayerScreen(
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
             .onGloballyPositioned { coordinates ->
                 screenWidthPx = coordinates.size.width.toFloat()
             }
-            .graphicsLayer {
-                val offset = pullDownOffsetPx
-                val useExitAnimation = isExitingScreen && offset == 0f
-                val progress = if (offset > 0f) (offset / 800f).coerceIn(0f, 1f) else 0f
-                val scale = 1f - progress * 0.12f
-                scaleX = if (useExitAnimation) exitScale else scale
-                scaleY = if (useExitAnimation) exitScale else scale
-                alpha = if (useExitAnimation) {
-                    exitAlpha
-                } else if (isExitingScreen) {
-                    (1f - offset / 1200f).coerceIn(0f, 1f)
-                } else {
-                    1f - progress * 0.4f
-                }
-                translationY = if (useExitAnimation) 0f else offset
-            }
     ) {
+        // Backdrop (fades only)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .graphicsLayer {
+                    val dx = pullDownOffsetX
+                    val dy = pullDownOffsetY
+                    val dist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                    val progress = (dist / 800f).coerceIn(0f, 1f)
+                    alpha = if (isExitingScreen) {
+                        val currentAlpha = (1f - dist / 1200f).coerceIn(0f, 1f)
+                        if (dx == 0f && dy == 0f) exitAlpha else currentAlpha
+                    } else {
+                        1f - progress
+                    }
+                }
+        )
+
+        // Player content (scales, translates, and exits)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val dx = pullDownOffsetX
+                    val dy = pullDownOffsetY
+                    val dist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                    val useExitAnimation = isExitingScreen && dx == 0f && dy == 0f
+                    val progress = (dist / 800f).coerceIn(0f, 1f)
+                    val scale = 1f - progress * 0.25f
+                    scaleX = if (useExitAnimation) exitScale else scale
+                    scaleY = if (useExitAnimation) exitScale else scale
+                    alpha = if (useExitAnimation) {
+                        exitAlpha
+                    } else if (isExitingScreen) {
+                        (1f - dist / 1200f).coerceIn(0f, 1f)
+                    } else {
+                        1f
+                    }
+                    translationX = if (useExitAnimation) 0f else dx
+                    translationY = if (useExitAnimation) 0f else dy
+                }
+        ) {
         PlayerGestureOverlay(
             seekSeconds = skipSeconds,
             durationMs = duration,
@@ -1228,35 +1255,67 @@ fun VideoPlayerScreen(
             onLongPressSpeed = { active -> setPlaybackSpeedCompat(if (active) 2f else playbackSpeed) },
             onSwipeDrag = { dragX -> handleSwipeDrag(dragX) },
             onSwipeRelease = { totalDragX -> handleSwipeRelease(totalDragX) },
-            onPullDownDrag = { dy ->
-                pullDownOffsetPx = dy
+            onPullDownDrag = { dx, dy ->
+                pullDownOffsetX = dx
+                pullDownOffsetY = dy
             },
-            onPullDownRelease = { dy ->
+            onPullDownRelease = { dx, dy ->
                 scope.launch {
-                    if (dy > 200f) {
+                    val dist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                    if (dist > 200f) {
                         // 拖拽距离足够 → 触发关闭，停止播放并保存进度
                         isExitingScreen = true
                         pauseCompat()
                         markIfWatched()
                         
-                        // 使用帧时钟驱动动画，避免固定 delay 造成掉帧和速度不均。
-                        animate(
-                            initialValue = pullDownOffsetPx,
-                            targetValue = 2000f,
-                            animationSpec = tween(durationMillis = 180)
-                        ) { value, _ ->
-                            pullDownOffsetPx = value
+                        // 沿着滑动方向飞出屏幕
+                        val targetX = if (dist > 0f) (dx / dist) * 2000f else 0f
+                        val targetY = if (dist > 0f) (dy / dist) * 2000f else 2000f
+                        
+                        val jobX = launch {
+                            animate(
+                                initialValue = pullDownOffsetX,
+                                targetValue = targetX,
+                                animationSpec = tween(durationMillis = 180)
+                            ) { value, _ ->
+                                pullDownOffsetX = value
+                            }
                         }
+                        val jobY = launch {
+                            animate(
+                                initialValue = pullDownOffsetY,
+                                targetValue = targetY,
+                                animationSpec = tween(durationMillis = 180)
+                            ) { value, _ ->
+                                pullDownOffsetY = value
+                            }
+                        }
+                        jobX.join()
+                        jobY.join()
                         onBackClick()
                     } else {
-                        animate(
-                            initialValue = pullDownOffsetPx,
-                            targetValue = 0f,
-                            animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f)
-                        ) { value, _ ->
-                            pullDownOffsetPx = value
+                        val jobX = launch {
+                            animate(
+                                initialValue = pullDownOffsetX,
+                                targetValue = 0f,
+                                animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f)
+                            ) { value, _ ->
+                                pullDownOffsetX = value
+                            }
                         }
-                        pullDownOffsetPx = 0f
+                        val jobY = launch {
+                            animate(
+                                initialValue = pullDownOffsetY,
+                                targetValue = 0f,
+                                animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f)
+                            ) { value, _ ->
+                                pullDownOffsetY = value
+                            }
+                        }
+                        jobX.join()
+                        jobY.join()
+                        pullDownOffsetX = 0f
+                        pullDownOffsetY = 0f
                     }
                 }
             }
@@ -1265,7 +1324,7 @@ fun VideoPlayerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .alpha(if (isExitingScreen && pullDownOffsetPx == 0f) exitAlpha else 1f)
+                    .alpha(if (isExitingScreen && pullDownOffsetX == 0f && pullDownOffsetY == 0f) exitAlpha else 1f)
                     .pointerInput(isScreenLocked, isExitingScreen, isSphericalMode) {
                         if (isScreenLocked || isExitingScreen || isSphericalMode) return@pointerInput
                         if (zoomScale > 1.0f) {
@@ -1751,6 +1810,7 @@ fun VideoPlayerScreen(
             }
         )
     }
+}
 
 
     if (showSettings) {

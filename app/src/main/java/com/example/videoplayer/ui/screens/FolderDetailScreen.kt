@@ -41,6 +41,9 @@ import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.data.repository.MediaRepository
 import com.example.videoplayer.ui.components.MediaGridTile
 import com.example.videoplayer.ui.components.MediaItemCard
+import com.example.videoplayer.data.model.LayoutMode
+import com.example.videoplayer.ui.components.MediaGalleryTile
+import androidx.compose.material.icons.filled.Collections
 import com.example.videoplayer.ui.components.folderDisplayName
 import com.example.videoplayer.ui.components.GlassmorphicCard
 import com.example.videoplayer.ui.components.AppBackground
@@ -88,7 +91,8 @@ fun FolderDetailScreen(
     )
     val lifecycleOwner = LocalContext.current as? LifecycleOwner
     val scope = rememberCoroutineScope()
-    var gridMode by remember { mutableStateOf(repository.isFolderGridModeEnabled()) }
+    var layoutMode by remember { mutableStateOf(repository.getFolderLayoutMode()) }
+    var galleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
     // 网格尺寸档位: 140=小, 220=中, 320=大
     var gridSizeDp by remember { mutableIntStateOf(repository.getFolderGridSize()) }
     var selectedKeys by remember(folderName) { mutableStateOf<Set<String>>(emptySet()) }
@@ -134,7 +138,7 @@ fun FolderDetailScreen(
                     playlistKeys = repository.playlistKeySnapshot()
                     resumeTrigger++
                     scope.launch {
-                        if (gridMode) gridState.scrollToItem(targetIndex) else listState.scrollToItem(targetIndex)
+                        if (layoutMode != LayoutMode.LIST) gridState.scrollToItem(targetIndex) else listState.scrollToItem(targetIndex)
                     }
                 }
             }
@@ -166,7 +170,7 @@ fun FolderDetailScreen(
                 actions = {
                     if (!isSelecting) {
                         // 网格尺寸切换（仅网格模式显示）
-                        if (gridMode) {
+                        if (layoutMode == LayoutMode.GRID) {
                             val sizes = listOf(140 to "S", 220 to "M", 320 to "L")
                             sizes.forEach { (size, label) ->
                                 val isActive = gridSizeDp == size
@@ -200,12 +204,20 @@ fun FolderDetailScreen(
                             Spacer(Modifier.width(4.dp))
                         }
                         IconButton(onClick = {
-                            gridMode = !gridMode
-                            repository.setFolderGridModeEnabled(gridMode)
+                            layoutMode = when (layoutMode) {
+                                LayoutMode.LIST -> LayoutMode.GRID
+                                LayoutMode.GRID -> LayoutMode.GALLERY
+                                LayoutMode.GALLERY -> LayoutMode.LIST
+                            }
+                            repository.setFolderLayoutMode(layoutMode)
                         }) {
                             Icon(
-                                imageVector = if (gridMode) Icons.AutoMirrored.Filled.ViewList else Icons.Default.GridView,
-                                contentDescription = if (gridMode) "List" else "Grid",
+                                imageVector = when (layoutMode) {
+                                    LayoutMode.LIST -> Icons.Default.GridView
+                                    LayoutMode.GRID -> Icons.Default.Collections
+                                    LayoutMode.GALLERY -> Icons.AutoMirrored.Filled.ViewList
+                                },
+                                contentDescription = "Switch Layout",
                                 tint = Color.White
                             )
                         }
@@ -230,70 +242,103 @@ fun FolderDetailScreen(
                     Text("暂无媒体文件", color = TextSecondary, fontSize = 14.sp)
                 }
             } else {
-                if (gridMode) {
-                    LazyVerticalGrid(
-                        state = gridState,
-                        columns = GridCells.Adaptive(gridSizeDp.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        contentPadding = PaddingValues(bottom = 96.dp, top = 8.dp)
-                    ) {
-                        gridItems(
-                            visibleItems,
-                            key = { it.storageKey },
-                            contentType = { it.type }
-                        ) { item ->
-                            MediaGridTile(
-                                item = item,
-                                isSelected = item.storageKey in selectedKeys,
-                                progressFraction = progressSnapshot[item.storageKey] ?: 0f,
-                                isLastViewed = lastViewedKey == item.storageKey,
-                                onLongClick = { toggleSelection(item) },
-                                onClick = { openItem(item) }
-                            )
+                when (layoutMode) {
+                    LayoutMode.LIST -> {
+                        LazyColumn(
+                            state = listState,
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            contentPadding = PaddingValues(bottom = 96.dp, top = 8.dp)
+                        ) {
+                            items(
+                                visibleItems,
+                                key = { it.storageKey },
+                                contentType = { it.type }
+                            ) { item ->
+                                MediaItemCard(
+                                    item = item,
+                                    isFavorite = item.storageKey in favoriteKeys,
+                                    isInPlaylist = item.storageKey in playlistKeys,
+                                    isSelected = item.storageKey in selectedKeys,
+                                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+                                    isLastViewed = lastViewedKey == item.storageKey,
+                                    onLongClick = { toggleSelection(item) },
+                                    onFavoriteClick = {
+                                        val nextFavorite = item.storageKey !in favoriteKeys
+                                        repository.setFavorite(item, nextFavorite)
+                                        favoriteKeys = if (nextFavorite) favoriteKeys + item.storageKey else favoriteKeys - item.storageKey
+                                    },
+                                    onPlaylistClick = {
+                                        val nextInPlaylist = item.storageKey !in playlistKeys
+                                        repository.setInPlaylist(item, nextInPlaylist)
+                                        playlistKeys = if (nextInPlaylist) playlistKeys + item.storageKey else playlistKeys - item.storageKey
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(if (nextInPlaylist) "已加入播放列表" else "已移出播放列表")
+                                        }
+                                    },
+                                    onClick = { openItem(item) }
+                                )
+                            }
                         }
                     }
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(bottom = 96.dp, top = 8.dp)
-                    ) {
-                        items(
-                            visibleItems,
-                            key = { it.storageKey },
-                            contentType = { it.type }
-                        ) { item ->
-                            MediaItemCard(
-                                item = item,
-                                isFavorite = item.storageKey in favoriteKeys,
-                                isInPlaylist = item.storageKey in playlistKeys,
-                                isSelected = item.storageKey in selectedKeys,
-                                progressFraction = progressSnapshot[item.storageKey] ?: 0f,
-                                isLastViewed = lastViewedKey == item.storageKey,
-                                onLongClick = { toggleSelection(item) },
-                                onFavoriteClick = {
-                                    val nextFavorite = item.storageKey !in favoriteKeys
-                                    repository.setFavorite(item, nextFavorite)
-                                    favoriteKeys = if (nextFavorite) favoriteKeys + item.storageKey else favoriteKeys - item.storageKey
-                                },
-                                onPlaylistClick = {
-                                    val nextInPlaylist = item.storageKey !in playlistKeys
-                                    repository.setInPlaylist(item, nextInPlaylist)
-                                    playlistKeys = if (nextInPlaylist) playlistKeys + item.storageKey else playlistKeys - item.storageKey
-                                    scope.launch {
-                                        snackbarHostState.showSnackbar(if (nextInPlaylist) "已加入播放列表" else "已移出播放列表")
-                                    }
-                                },
-                                onClick = { openItem(item) }
+                    LayoutMode.GRID -> {
+                        LazyVerticalGrid(
+                            state = gridState,
+                            columns = GridCells.Adaptive(gridSizeDp.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            contentPadding = PaddingValues(bottom = 96.dp, top = 8.dp)
+                        ) {
+                            gridItems(
+                                visibleItems,
+                                key = { it.storageKey },
+                                contentType = { it.type }
+                            ) { item ->
+                                MediaGridTile(
+                                    item = item,
+                                    isSelected = item.storageKey in selectedKeys,
+                                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+                                    isLastViewed = lastViewedKey == item.storageKey,
+                                    onLongClick = { toggleSelection(item) },
+                                    onClick = { openItem(item) }
+                                )
+                            }
+                        }
+                    }
+                    LayoutMode.GALLERY -> {
+                        LazyVerticalGrid(
+                            state = gridState,
+                            columns = GridCells.Fixed(galleryColumns),
+                            verticalArrangement = Arrangement.spacedBy(1.5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+                            contentPadding = PaddingValues(bottom = 96.dp, top = 8.dp),
+                            modifier = Modifier.pinchToZoomColumns(
+                                columns = galleryColumns,
+                                onColumnsChange = { cols ->
+                                    galleryColumns = cols
+                                    repository.setGalleryColumnCount(cols)
+                                }
                             )
+                        ) {
+                            gridItems(
+                                visibleItems,
+                                key = { it.storageKey },
+                                contentType = { it.type }
+                            ) { item ->
+                                MediaGalleryTile(
+                                    item = item,
+                                    isSelected = item.storageKey in selectedKeys,
+                                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+                                    onClick = { openItem(item) },
+                                    onLongClick = { toggleSelection(item) }
+                                )
+                            }
                         }
                     }
                 }
 
-                val scrollFraction by remember(gridMode, visibleItems) {
+                val scrollFraction by remember(layoutMode, visibleItems) {
                     derivedStateOf {
-                        if (gridMode) {
+                        if (layoutMode != LayoutMode.LIST) {
                             val layoutInfo = gridState.layoutInfo
                             val totalItems = layoutInfo.totalItemsCount
                             val firstVisible = layoutInfo.visibleItemsInfo.firstOrNull()
@@ -316,7 +361,7 @@ fun FolderDetailScreen(
                     modifier = Modifier.align(Alignment.CenterEnd),
                     onIndexChange = { index ->
                         scope.launch {
-                            if (gridMode) gridState.scrollToItem(index) else listState.scrollToItem(index)
+                            if (layoutMode != LayoutMode.LIST) gridState.scrollToItem(index) else listState.scrollToItem(index)
                         }
                     }
                 )

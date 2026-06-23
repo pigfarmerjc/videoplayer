@@ -50,8 +50,8 @@ fun PlayerGestureOverlay(
     onLongPressSpeed: (Boolean) -> Unit, // true for 2x, false for normal
     onSwipeDrag: (Float) -> Unit = {},
     onSwipeRelease: (Float) -> Unit = {},
-    onPullDownDrag: (Float) -> Unit = {},    // 下拉位移（px）
-    onPullDownRelease: (Float) -> Unit = {}, // 释放时传入最终位移
+    onPullDownDrag: (Float, Float) -> Unit = { _, _ -> },   // dx, dy 实际偏移量（px）
+    onPullDownRelease: (Float, Float) -> Unit = { _, _ -> }, // 释放时传入最终 dx, dy
     content: @Composable BoxScope.() -> Unit
 ) {
     val context = LocalContext.current
@@ -115,6 +115,7 @@ fun PlayerGestureOverlay(
     val currentOnSwipeRelease by rememberUpdatedState(onSwipeRelease)
     val currentOnPullDownDrag by rememberUpdatedState(onPullDownDrag)
     val currentOnPullDownRelease by rememberUpdatedState(onPullDownRelease)
+
 
     Box(
         modifier = modifier
@@ -225,7 +226,7 @@ fun PlayerGestureOverlay(
                                 4 -> currentOnScrubFinished(scrubTarget)
                                 5 -> {
                                     showPullDownHint = false
-                                    currentOnPullDownRelease(totalDragY)
+                                    currentOnPullDownRelease(totalDragX, totalDragY)
                                 }
                             }
                             if (dragType in 2..4) hideIndicatorLater()
@@ -237,7 +238,7 @@ fun PlayerGestureOverlay(
                                 1 -> currentOnSwipeRelease(0f)
                                 5 -> {
                                     showPullDownHint = false
-                                    currentOnPullDownRelease(0f)
+                                    currentOnPullDownRelease(0f, 0f)
                                 }
                             }
                             if (dragType in 2..4) hideIndicatorLater()
@@ -255,15 +256,16 @@ fun PlayerGestureOverlay(
                             if (dragType == 0) {
                                 val absDx = abs(totalDragX)
                                 val absDy = abs(totalDragY)
+                                val dist = Math.sqrt((totalDragX * totalDragX + totalDragY * totalDragY).toDouble()).toFloat()
 
-                                // ── 优先判断下拉关闭：左上角25%宽度，向下滑，且纵向位移 > 横向位移 ──
-                                if (startX < screenWidth * 0.25f
-                                    && totalDragY > 0f
-                                    && absDy > absDx
-                                    && absDy > vertThreshold
+                                // ── 优先判断滑动关闭：左上角 1/3 宽 × 1/3 高区域，任意方向划动超过阈值 ──
+                                if (startX < screenWidth * 0.33f
+                                    && startY < screenHeight * 0.33f
+                                    && dist > vertThreshold
                                 ) {
                                     dragType = 5
                                     showPullDownHint = true
+
                                 }
                                 // ── 水平切换视频（上半屏）或进度条拖拽（下半屏）──
                                 else if (absDx > absDy && absDx > horizThreshold) {
@@ -279,7 +281,7 @@ fun PlayerGestureOverlay(
                                         )
                                     }
                                 }
-                                // ── 竖直滑动：左侧=亮度，右侧=音量，中间=忽略 ──
+                                // ── 竖直滑动：左侧=亮度（排除左上角关闭区域），右侧=音量，中间=忽略 ──
                                 else if (absDy > absDx && absDy > vertThreshold) {
                                     dragType = when {
                                         startX < screenWidth * 0.25f -> 2
@@ -374,9 +376,7 @@ fun PlayerGestureOverlay(
                                 }
 
                                 5 -> {
-                                    // 下拉关闭：只传递正向（向下）位移
-                                    val clamped = totalDragY.coerceAtLeast(0f)
-                                    currentOnPullDownDrag(clamped)
+                                    currentOnPullDownDrag(totalDragX, totalDragY)
                                 }
                             }
                         }
@@ -411,7 +411,7 @@ fun PlayerGestureOverlay(
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(Modifier.width(4.dp))
-                Text("下滑关闭", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                Text("滑动关闭", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             }
         }
 
