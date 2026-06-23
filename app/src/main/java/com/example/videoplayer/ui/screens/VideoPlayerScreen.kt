@@ -248,6 +248,8 @@ fun VideoPlayerScreen(
     var isScreenLocked by remember { mutableStateOf(false) }
     var isWaitingForFirstFrame by remember { mutableStateOf(false) }
     var isExitingScreen by remember { mutableStateOf(false) }
+    var abLoopStartMs by remember { mutableStateOf<Long?>(null) }
+    var abLoopEndMs by remember { mutableStateOf<Long?>(null) }
     // 下拉关闭的偏移（px），用于视差动画
     var pullDownOffsetX by remember { mutableFloatStateOf(0f) }
     var pullDownOffsetY by remember { mutableFloatStateOf(0f) }
@@ -659,6 +661,32 @@ fun VideoPlayerScreen(
         }
     }
 
+    fun handleAbLoopClick() {
+        val start = abLoopStartMs
+        val end = abLoopEndMs
+        when {
+            start == null -> {
+                abLoopStartMs = currentPosition
+                showMessage("已设置循环起点 A: ${formatDuration(currentPosition)}")
+            }
+            end == null -> {
+                if (currentPosition <= start) {
+                    abLoopEndMs = start
+                    abLoopStartMs = currentPosition
+                    showMessage("已设置循环区间 A-B: ${formatDuration(currentPosition)} - ${formatDuration(start)}")
+                } else {
+                    abLoopEndMs = currentPosition
+                    showMessage("已设置循环区间 A-B: ${formatDuration(start)} - ${formatDuration(currentPosition)}")
+                }
+            }
+            else -> {
+                abLoopStartMs = null
+                abLoopEndMs = null
+                showMessage("已取消 A-B 区间循环播放")
+            }
+        }
+    }
+
     fun captureScreenshot() {
         val video = currentVideo
         val position = currentPosition
@@ -814,6 +842,8 @@ fun VideoPlayerScreen(
         } ?: inferProjectionMode(currentVideo)
         useProjectionSensor = repository.isProjectionSensorEnabled(currentVideo)
         repository.markLastViewed(folderName, currentVideo)
+        abLoopStartMs = null
+        abLoopEndMs = null
         
         // Reset VLC tracks
         vlcAudioTracks = emptyList()
@@ -979,13 +1009,20 @@ fun VideoPlayerScreen(
                             }
                         }
                         if (state == Player.STATE_ENDED) {
-                            repository.markWatched(latestCurrentVideo)
-                            when {
-                                latestAutoReplay -> {
-                                    exoPlayer.seekTo(0L)
-                                    exoPlayer.play()
+                            val loopStart = abLoopStartMs
+                            val loopEnd = abLoopEndMs
+                            if (loopStart != null && loopEnd != null) {
+                                exoPlayer.seekTo(loopStart)
+                                exoPlayer.play()
+                            } else {
+                                repository.markWatched(latestCurrentVideo)
+                                when {
+                                    latestAutoReplay -> {
+                                        exoPlayer.seekTo(0L)
+                                        exoPlayer.play()
+                                    }
+                                    latestAutoPlayNext -> playNext.value()
                                 }
-                                latestAutoPlayNext -> playNext.value()
                             }
                         }
                     }
@@ -1040,6 +1077,14 @@ fun VideoPlayerScreen(
                         currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                         val dur = exoPlayer.duration.coerceAtLeast(0L)
                         if (dur > 0L) duration = dur
+
+                        val loopStart = abLoopStartMs
+                        val loopEnd = abLoopEndMs
+                        if (loopStart != null && loopEnd != null && currentPosition >= loopEnd) {
+                            exoPlayer.seekTo(loopStart)
+                            currentPosition = loopStart
+                        }
+
                         val video = latestCurrentVideo
                         if (shouldMarkWatched(currentPosition, dur)) {
                             repository.markWatched(video)
@@ -1434,17 +1479,31 @@ fun VideoPlayerScreen(
                             if (!isWaitingForReady && !isScrubbing) {
                                 currentPosition = position
                                 if (length > 0L) duration = length
+
+                                val loopStart = abLoopStartMs
+                                val loopEnd = abLoopEndMs
+                                if (loopStart != null && loopEnd != null && currentPosition >= loopEnd) {
+                                    vlcSeekTo(loopStart)
+                                    currentPosition = loopStart
+                                }
                             }
                             isPlaying = playing
                         },
                         onEnded = {
-                            repository.markWatched(currentVideo)
-                            when {
-                                autoReplay -> {
-                                    seekToPosition(0L, force = true)
-                                    vlcTogglePlayPause()
+                            val loopStart = abLoopStartMs
+                            val loopEnd = abLoopEndMs
+                            if (loopStart != null && loopEnd != null) {
+                                seekToPosition(loopStart, force = true)
+                                if (!isPlaying) vlcTogglePlayPause()
+                            } else {
+                                repository.markWatched(currentVideo)
+                                when {
+                                    autoReplay -> {
+                                        seekToPosition(0L, force = true)
+                                        vlcTogglePlayPause()
+                                    }
+                                    autoPlayNext -> playNext.value()
                                 }
-                                autoPlayNext -> playNext.value()
                             }
                         },
                         onError = {
@@ -1724,7 +1783,10 @@ fun VideoPlayerScreen(
                     },
                     onSetCover = { selectCustomCover() },
                     onInfo = { showInfo = true },
-                    onSettings = { showSettings = true }
+                    onSettings = { showSettings = true },
+                    abLoopStartMs = abLoopStartMs,
+                    abLoopEndMs = abLoopEndMs,
+                    onAbLoopClick = { handleAbLoopClick() }
                 )
             }
 
@@ -2291,7 +2353,9 @@ private fun ExactVideoSeekBar(
     durationMs: Long,
     modifier: Modifier = Modifier,
     onSeek: (Long) -> Unit,
-    onSeekFinished: (Long) -> Unit
+    onSeekFinished: (Long) -> Unit,
+    abLoopStartMs: Long?,
+    abLoopEndMs: Long?
 ) {
     var widthPx by remember { mutableIntStateOf(0) }
     var dragTargetMs by remember { mutableLongStateOf(positionMs) }
@@ -2339,18 +2403,57 @@ private fun ExactVideoSeekBar(
         val trackTop = (size.height - trackHeight) / 2f
         val progress = if (durationMs > 0L) shownPosition.toFloat() / durationMs.toFloat() else 0f
         val progressWidth = size.width * progress.coerceIn(0f, 1f)
+
+        // Draw track background
         drawRoundRect(
             color = Color.White.copy(alpha = 0.2f),
             topLeft = Offset(0f, trackTop),
             size = Size(size.width, trackHeight),
             cornerRadius = CornerRadius(trackHeight, trackHeight)
         )
+
+        // Draw A-B loop highlight region
+        val startFrac = if (durationMs > 0L && abLoopStartMs != null) abLoopStartMs.toFloat() / durationMs.toFloat() else null
+        val endFrac = if (durationMs > 0L && abLoopEndMs != null) abLoopEndMs.toFloat() / durationMs.toFloat() else null
+        if (startFrac != null && endFrac != null) {
+            val abLeft = startFrac * size.width
+            val abRight = endFrac * size.width
+            drawRect(
+                color = SecondaryNeonCyan.copy(alpha = 0.35f),
+                topLeft = Offset(abLeft, trackTop - 2.dp.toPx()),
+                size = Size(abRight - abLeft, trackHeight + 4.dp.toPx())
+            )
+        }
+
+        // Draw progress track
         drawRoundRect(
             color = SecondaryNeonCyan,
             topLeft = Offset(0f, trackTop),
             size = Size(progressWidth, trackHeight),
             cornerRadius = CornerRadius(trackHeight, trackHeight)
         )
+
+        // Draw A-B tick markers
+        if (startFrac != null) {
+            val aX = startFrac * size.width
+            drawLine(
+                color = SecondaryNeonCyan,
+                start = Offset(aX, trackTop - 6.dp.toPx()),
+                end = Offset(aX, trackTop + trackHeight + 6.dp.toPx()),
+                strokeWidth = 2.dp.toPx()
+            )
+        }
+        if (endFrac != null) {
+            val bX = endFrac * size.width
+            drawLine(
+                color = SecondaryNeonCyan,
+                start = Offset(bX, trackTop - 6.dp.toPx()),
+                end = Offset(bX, trackTop + trackHeight + 6.dp.toPx()),
+                strokeWidth = 2.dp.toPx()
+            )
+        }
+
+        // Draw progress thumb circle
         drawCircle(
             color = Color.White,
             radius = 7.dp.toPx(),
@@ -2983,7 +3086,10 @@ private fun BottomControls(
     onGif: () -> Unit,
     onSetCover: () -> Unit,
     onInfo: () -> Unit,
-    onSettings: () -> Unit
+    onSettings: () -> Unit,
+    abLoopStartMs: Long?,
+    abLoopEndMs: Long?,
+    onAbLoopClick: () -> Unit
 ) {
     var showSpeedPanel by remember { mutableStateOf(false) }
 
@@ -3023,7 +3129,9 @@ private fun BottomControls(
                         delay(300)
                         isDragging = false
                     }
-                }
+                },
+                abLoopStartMs = abLoopStartMs,
+                abLoopEndMs = abLoopEndMs
             )
             Text(formatDuration(duration), color = Color.White, fontSize = 11.sp)
         }
@@ -3076,6 +3184,18 @@ private fun BottomControls(
                     }
                     IconButton(onClick = onInfo) {
                         Icon(Icons.Default.Info, contentDescription = "视频信息", tint = Color.White)
+                    }
+                    TextButton(onClick = onAbLoopClick) {
+                        Text(
+                            text = when {
+                                abLoopStartMs != null && abLoopEndMs != null -> "A-B"
+                                abLoopStartMs != null -> "A-"
+                                else -> "A-B"
+                            },
+                            color = if (abLoopStartMs != null) SecondaryNeonCyan else Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                     TextButton(onClick = { showSpeedPanel = !showSpeedPanel }) {
                         Text("${playbackSpeed}x", color = Color.White, fontSize = 12.sp)
