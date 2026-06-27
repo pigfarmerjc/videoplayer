@@ -25,6 +25,8 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -81,6 +83,12 @@ class FloatingPlayerService : Service() {
     private var isDragging = false
     private var isResizing = false
     private var isTouchConsumedByScale = false
+    // Double-tap seek detection
+    private var lastTapTimeMs = 0L
+    private var lastTapRawX = 0f
+    private val DOUBLE_TAP_MAX_MS = 350L
+    private val DOUBLE_TAP_SLOP_PX = 80f
+    private val SEEK_STEP_MS = 10_000L
 
     // Scale gesture
     private lateinit var scaleGestureDetector: ScaleGestureDetector
@@ -317,8 +325,11 @@ class FloatingPlayerService : Service() {
                     FloatingPlayerManager.width = newW
                     FloatingPlayerManager.height = newH
                 } else if (isDragging) {
-                    lp.x = touchDownWindowX + dx
-                    lp.y = touchDownWindowY + dy
+                    val dm = resources.displayMetrics
+                    val maxX = dm.widthPixels - lp.width
+                    val maxY = dm.heightPixels - lp.height
+                    lp.x = (touchDownWindowX + dx).coerceIn(0, maxX.coerceAtLeast(0))
+                    lp.y = (touchDownWindowY + dy).coerceIn(0, maxY.coerceAtLeast(0))
                     safeUpdateLayout(lp)
                     FloatingPlayerManager.x = lp.x
                     FloatingPlayerManager.y = lp.y
@@ -332,15 +343,26 @@ class FloatingPlayerService : Service() {
                 android.util.Log.d("FloatingPlayer", "UP dx=$dx dy=$dy isDragging=$isDragging isResizing=$isResizing scale=${scaleGestureDetector.isInProgress}")
 
                 if (!isDragging && !isResizing && !isTouchConsumedByScale && dx < dpToPx(8) && dy < dpToPx(8)) {
-                    // It's a tap — but we need to check if a button got it first
-                    // If controls are already visible, the button's onClick will handle itself
-                    // If controls are hidden, show them (tap on video area)
-                    if (controlOverlay?.visibility != View.VISIBLE) {
-                        showControls()
-                    }
-                    // If controls ARE visible and the tap didn't land on a button, hide them
-                    else if (!tapHitButton(event.rawX, event.rawY)) {
-                        hideControls()
+                    val now = System.currentTimeMillis()
+                    val timeSinceLast = now - lastTapTimeMs
+                    val xDist = kotlin.math.abs(event.rawX - lastTapRawX)
+                    if (timeSinceLast in 80..DOUBLE_TAP_MAX_MS && xDist < DOUBLE_TAP_SLOP_PX) {
+                        // Double tap detected — seek forward/backward
+                        val lp = floatingView?.layoutParams as? WindowManager.LayoutParams
+                        val tapX = event.x
+                        val halfW = (lp?.width ?: 1) / 2f
+                        val seekDelta = if (tapX > halfW) SEEK_STEP_MS else -SEEK_STEP_MS
+                        seekBy(seekDelta)
+                        lastTapTimeMs = 0L  // reset so triple-tap doesn't re-trigger
+                    } else {
+                        // Single tap: toggle controls visibility
+                        lastTapTimeMs = now
+                        lastTapRawX = event.rawX
+                        if (controlOverlay?.visibility != View.VISIBLE) {
+                            showControls()
+                        } else {
+                            hideControls()
+                        }
                     }
                 }
 
@@ -512,12 +534,13 @@ class FloatingPlayerService : Service() {
         controlsTimeoutRunnable = Runnable {
             controlOverlay?.visibility = View.GONE
         }.also {
-            mainHandler.postDelayed(it, 3500)
+            mainHandler.postDelayed(it, 2000)
         }
     }
 
     private fun initializePlayer() {
         val currentItem = FloatingPlayerManager.playlist.getOrNull(FloatingPlayerManager.currentIndex) ?: return
+        releasePlayer()
         titleText?.text = currentItem.displayName
 
         val oldAspectRatio = aspectRatio
@@ -602,8 +625,15 @@ class FloatingPlayerService : Service() {
             .setBufferDurationsMs(minBuffer, maxBuffer, playBuffer, rebufferBuffer)
             .build()
 
+        val audioAttrs = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
+
         val player = ExoPlayer.Builder(applicationContext)
             .setRenderersFactory(renderersFactory)
+            .setAudioAttributes(audioAttrs, /* handleAudioFocus= */ true)
+            .setHandleAudioBecomingNoisy(true)
             .setLoadControl(loadControl)
             .setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC)
             .build()
@@ -712,6 +742,22 @@ class FloatingPlayerService : Service() {
 
     private fun quadruplet(a: Int, b: Int, c: Int, d: Int): Quadruplet = Quadruplet(a, b, c, d)
     private data class Quadruplet(val minBuffer: Int, val maxBuffer: Int, val playBuffer: Int, val rebufferBuffer: Int)
+
+    private fun seekBy(deltaMs: Long) {
+        if (FloatingPlayerManager.useVlcFallback) {
+            vlcMediaPlayer?.let { mp ->
+                val newTime = (mp.time + deltaMs).coerceIn(0L, mp.length.coerceAtLeast(1L))
+                mp.time = newTime
+            }
+        } else {
+            exoPlayer?.let { p ->
+                val newPos = (p.currentPosition + deltaMs).coerceIn(0L, p.duration.coerceAtLeast(1L))
+                p.seekTo(newPos)
+            }
+        }
+        // Brief visual feedback via progress bar flash handled by ticker
+        resetControlsTimeout()
+    }
 
     private fun togglePlayPause() {
         if (FloatingPlayerManager.useVlcFallback) {
@@ -823,10 +869,10 @@ class FloatingPlayerService : Service() {
                     progressBar?.progress = ((pos * 100) / dur).toInt()
                 }
                 FloatingPlayerManager.currentPosition = pos
-                mainHandler.postDelayed(this, 1000)
+                mainHandler.postDelayed(this, 500)
             }
         }.also {
-            mainHandler.postDelayed(it, 1000)
+            mainHandler.postDelayed(it, 500)
         }
     }
 
@@ -881,6 +927,11 @@ class FloatingPlayerService : Service() {
     }
 
     private fun getAspectRatio(resolution: String): Float {
+        // Prefer actual video dimensions stored in FloatingPlayerManager (set when launching)
+        val vw = FloatingPlayerManager.videoWidth
+        val vh = FloatingPlayerManager.videoHeight
+        if (vw > 0 && vh > 0) return vw.toFloat() / vh.toFloat()
+        // Fallback: parse resolution string e.g. "1920x1080"
         if (resolution.contains("x")) {
             val parts = resolution.split("x")
             val w = parts.getOrNull(0)?.toFloatOrNull() ?: 0f
@@ -905,6 +956,7 @@ class FloatingPlayerService : Service() {
             floatingView = null
         }
         FloatingPlayerManager.isFloating = false
+        MainActivity.isVideoPlaying = false
         super.onDestroy()
     }
 }

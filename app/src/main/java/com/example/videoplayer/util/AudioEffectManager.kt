@@ -25,7 +25,7 @@ object AudioEffectManager {
             
             // Map 101% - 200% linearly to 0 mB - 2000 mB (+20 dB)
             val targetGainMb = (percent - 100) * 20
-            enhancer.targetGain = targetGainMb
+            enhancer.setTargetGain(targetGainMb)
             if (!enhancer.enabled) {
                 enhancer.enabled = true
             }

@@ -19,6 +19,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
@@ -40,6 +41,13 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.PictureInPicture
@@ -102,6 +110,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.video.spherical.SphericalGLSurfaceView
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.videoplayer.data.model.MediaItem as PlayerMediaItem
@@ -118,6 +127,7 @@ import com.example.videoplayer.ui.theme.*
 import com.example.videoplayer.util.SimpleGifEncoder
 import com.example.videoplayer.util.DlnaCastManager
 import com.example.videoplayer.util.DlnaDevice
+import com.example.videoplayer.util.AudioEffectManager
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.BorderStroke
@@ -163,6 +173,13 @@ private data class BufferProfile(
     val bufferForPlaybackAfterRebufferMs: Int
 )
 
+private enum class VideoProjectionMode(val label: String, val stereoMode: Int?) {
+    STANDARD("普通画面", null),
+    SPHERE_MONO("360° 全景", C.STEREO_MODE_MONO),
+    SPHERE_SBS("360° 左右 3D", C.STEREO_MODE_LEFT_RIGHT),
+    SPHERE_TOP_BOTTOM("360° 上下 3D", C.STEREO_MODE_TOP_BOTTOM)
+}
+
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class, androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun VideoPlayerScreen(
@@ -204,9 +221,15 @@ fun VideoPlayerScreen(
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
     var showSettings by remember { mutableStateOf(false) }
+    var virtualVolumePercent by remember { mutableIntStateOf(100) }
+    var currentEqPreset by remember { mutableStateOf("Normal") }
     var showInfo by remember { mutableStateOf(false) }
     var playbackSpeed by remember { mutableFloatStateOf(1f) }
     var resizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var projectionMode by remember { mutableStateOf(VideoProjectionMode.STANDARD) }
+    var projectionModeExplicit by remember { mutableStateOf(false) }
+    var useProjectionSensor by remember { mutableStateOf(true) }
+    val isSphericalMode = projectionMode != VideoProjectionMode.STANDARD
     var skipSeconds by remember { mutableIntStateOf(repository.getSkipSeconds()) }
     var autoReplay by remember { mutableStateOf(repository.isAutoReplayEnabled()) }
     var autoPlayNext by remember { mutableStateOf(repository.isAutoPlayNextEnabled()) }
@@ -225,8 +248,21 @@ fun VideoPlayerScreen(
     var isScreenLocked by remember { mutableStateOf(false) }
     var isWaitingForFirstFrame by remember { mutableStateOf(false) }
     var isExitingScreen by remember { mutableStateOf(false) }
-    // 下拉关闭的垂直位移（px），用于视差动画
-    var pullDownOffsetPx by remember { mutableFloatStateOf(0f) }
+    var abLoopStartMs by remember { mutableStateOf<Long?>(null) }
+    var abLoopEndMs by remember { mutableStateOf<Long?>(null) }
+    // 下拉关闭的偏移（px），用于视差动画
+    var pullDownOffsetX by remember { mutableFloatStateOf(0f) }
+    var pullDownOffsetY by remember { mutableFloatStateOf(0f) }
+
+    // Pinch-to-zoom & Pan states
+    val zoomScaleState = remember { mutableFloatStateOf(1.0f) }
+    var zoomScale by zoomScaleState
+    var zoomOffsetX by remember { mutableFloatStateOf(0f) }
+    var zoomOffsetY by remember { mutableFloatStateOf(0f) }
+    val isZoomed by remember { derivedStateOf { zoomScaleState.floatValue > 1.0f } }
+
+    // 4K playback startup stabilization state
+    var isFirstPlayPending by remember { mutableStateOf(true) }
 
     val scope = rememberCoroutineScope()
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -283,8 +319,10 @@ fun VideoPlayerScreen(
         FloatingPlayerManager.useVlcFallback = useVlcFallback
     }
 
-    LaunchedEffect(currentPosition) {
-        FloatingPlayerManager.currentPosition = currentPosition
+    LaunchedEffect(Unit) {
+        snapshotFlow { currentPosition }.collect { position ->
+            FloatingPlayerManager.currentPosition = position
+        }
     }
 
     val exitAlpha by animateFloatAsState(
@@ -309,6 +347,8 @@ fun VideoPlayerScreen(
 
     // Swipe preview state.
     val swipeOffsetAnim = remember { androidx.compose.animation.core.Animatable(0f) }
+    var swipeDragOffset by remember { mutableFloatStateOf(0f) }
+    var isSwipeDragging by remember { mutableStateOf(false) }
     var swipeTargetIndex by remember { mutableStateOf<Int?>(null) }
     var isSwipeAnimating by remember { mutableStateOf(false) }
     var isWaitingForReady by remember { mutableStateOf(true) }
@@ -336,15 +376,28 @@ fun VideoPlayerScreen(
         }
     }
 
+    fun updateProjectionMode(mode: VideoProjectionMode) {
+        projectionMode = mode
+        projectionModeExplicit = true
+        repository.setProjectionMode(currentVideo, mode.name)
+        if (mode != VideoProjectionMode.STANDARD && useVlcFallback) {
+            repository.setPreferredVlcDecoder(currentVideo, false)
+            useVlcFallback = false
+        }
+    }
+
+    val seekProfile = remember(currentVideo, duration) {
+        seekProfileFor(currentVideo, duration)
+    }
+
     fun handleScrubSeek(positionMs: Long, finished: Boolean) {
         val now = System.currentTimeMillis()
-        val profile = seekProfileFor(currentVideo, duration)
         
         currentPosition = positionMs
         
         if (finished) {
             isScrubbing = false
-            seekToPosition(positionMs, exact = profile.allowExactFinalSeek, force = true)
+            seekToPosition(positionMs, exact = seekProfile.allowExactFinalSeek, force = true)
             if (resumeAfterScrub) {
                 if (useVlcFallback) {
                     vlcTogglePlayPause()
@@ -374,7 +427,7 @@ fun VideoPlayerScreen(
                 pauseCompat()
             }
             // Throttle scrubbing seeks based on profile for better performance
-            if (now - lastScrubSeekAtMs >= profile.dragDecodeIntervalMs) {
+            if (now - lastScrubSeekAtMs >= seekProfile.dragDecodeIntervalMs) {
                 lastScrubSeekAtMs = now
                 seekToPosition(positionMs, exact = false)
             }
@@ -428,15 +481,13 @@ fun VideoPlayerScreen(
         }
         if (targetIndex in playlist.indices) {
             swipeTargetIndex = targetIndex
-            scope.launch {
-                swipeOffsetAnim.snapTo(dragX)
-            }
+            isSwipeDragging = true
+            swipeDragOffset = dragX
         } else {
             // Apply rubber-banding (drag resistance)
             swipeTargetIndex = null
-            scope.launch {
-                swipeOffsetAnim.snapTo(dragX * 0.25f)
-            }
+            isSwipeDragging = true
+            swipeDragOffset = dragX * 0.25f
         }
     }
 
@@ -446,6 +497,9 @@ fun VideoPlayerScreen(
         isSwipeAnimating = true
 
         scope.launch {
+            swipeOffsetAnim.snapTo(swipeDragOffset)
+            isSwipeDragging = false
+            swipeDragOffset = 0f
             val dragThreshold = screenWidthPx * 0.15f
             if (targetIndex != null && abs(totalDragX) > dragThreshold && targetIndex in playlist.indices) {
                 val direction = if (totalDragX < 0) 1 else -1
@@ -607,6 +661,32 @@ fun VideoPlayerScreen(
         }
     }
 
+    fun handleAbLoopClick() {
+        val start = abLoopStartMs
+        val end = abLoopEndMs
+        when {
+            start == null -> {
+                abLoopStartMs = currentPosition
+                showMessage("已设置循环起点 A: ${formatDuration(currentPosition)}")
+            }
+            end == null -> {
+                if (currentPosition <= start) {
+                    abLoopEndMs = start
+                    abLoopStartMs = currentPosition
+                    showMessage("已设置循环区间 A-B: ${formatDuration(currentPosition)} - ${formatDuration(start)}")
+                } else {
+                    abLoopEndMs = currentPosition
+                    showMessage("已设置循环区间 A-B: ${formatDuration(start)} - ${formatDuration(currentPosition)}")
+                }
+            }
+            else -> {
+                abLoopStartMs = null
+                abLoopEndMs = null
+                showMessage("已取消 A-B 区间循环播放")
+            }
+        }
+    }
+
     fun captureScreenshot() {
         val video = currentVideo
         val position = currentPosition
@@ -738,7 +818,7 @@ fun VideoPlayerScreen(
     }
 
     LaunchedEffect(isExitingScreen) {
-        if (isExitingScreen && pullDownOffsetPx == 0f) {
+        if (isExitingScreen && pullDownOffsetX == 0f && pullDownOffsetY == 0f) {
             pauseCompat()
             markIfWatched()
             delay(280)
@@ -755,7 +835,15 @@ fun VideoPlayerScreen(
         isFavorite = repository.isFavorite(currentVideo)
         playbackError = null
         useVlcFallback = repository.getPreferredVlcDecoder(currentVideo) ?: shouldPreferVlcEngine(currentVideo)
+        val savedProjectionMode = repository.getProjectionMode(currentVideo)
+        projectionModeExplicit = savedProjectionMode != null
+        projectionMode = savedProjectionMode?.let { saved ->
+            runCatching { VideoProjectionMode.valueOf(saved) }.getOrNull()
+        } ?: inferProjectionMode(currentVideo)
+        useProjectionSensor = repository.isProjectionSensorEnabled(currentVideo)
         repository.markLastViewed(folderName, currentVideo)
+        abLoopStartMs = null
+        abLoopEndMs = null
         
         // Reset VLC tracks
         vlcAudioTracks = emptyList()
@@ -854,6 +942,18 @@ fun VideoPlayerScreen(
 
                 player = exoPlayer
 
+                // Initialize audio effects immediately with active session ID
+                val initialSessionId = exoPlayer.audioSessionId
+                if (initialSessionId != androidx.media3.common.C.AUDIO_SESSION_ID_UNSET) {
+                    AudioEffectManager.onSessionChanged(initialSessionId)
+                    if (virtualVolumePercent > 100) {
+                        AudioEffectManager.setVolumeBoost(initialSessionId, virtualVolumePercent)
+                    }
+                    if (currentEqPreset != "Normal") {
+                        AudioEffectManager.applyPreset(initialSessionId, currentEqPreset)
+                    }
+                }
+
                 val listener = object : Player.Listener {
                     override fun onIsPlayingChanged(playing: Boolean) {
                         isPlaying = playing
@@ -861,6 +961,9 @@ fun VideoPlayerScreen(
 
                     override fun onTracksChanged(currentTracks: Tracks) {
                         tracks = currentTracks
+                        if (!projectionModeExplicit && projectionMode == VideoProjectionMode.STANDARD) {
+                            findEmbeddedProjectionMode(currentTracks)?.let { projectionMode = it }
+                        }
                         // Auto switch to VLC for PCM formats ExoPlayer cannot handle.
                         if (!useVlcFallback) {
                             var hasUnsupportedPcm = false
@@ -900,15 +1003,26 @@ fun VideoPlayerScreen(
                         if (state == Player.STATE_READY) {
                             duration = exoPlayer.duration.coerceAtLeast(0L)
                             playerReadyFlow.tryEmit(Unit)
+                            if (isFirstPlayPending) {
+                                isFirstPlayPending = false
+                                exoPlayer.playWhenReady = true
+                            }
                         }
                         if (state == Player.STATE_ENDED) {
-                            repository.markWatched(latestCurrentVideo)
-                            when {
-                                latestAutoReplay -> {
-                                    exoPlayer.seekTo(0L)
-                                    exoPlayer.play()
+                            val loopStart = abLoopStartMs
+                            val loopEnd = abLoopEndMs
+                            if (loopStart != null && loopEnd != null) {
+                                exoPlayer.seekTo(loopStart)
+                                exoPlayer.play()
+                            } else {
+                                repository.markWatched(latestCurrentVideo)
+                                when {
+                                    latestAutoReplay -> {
+                                        exoPlayer.seekTo(0L)
+                                        exoPlayer.play()
+                                    }
+                                    latestAutoPlayNext -> playNext.value()
                                 }
-                                latestAutoPlayNext -> playNext.value()
                             }
                         }
                     }
@@ -935,6 +1049,10 @@ fun VideoPlayerScreen(
                         useVlcFallback = true
                     }
 
+                    override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                        AudioEffectManager.onSessionChanged(audioSessionId)
+                    }
+
                     override fun onPositionDiscontinuity(
                         oldPosition: Player.PositionInfo,
                         newPosition: Player.PositionInfo,
@@ -959,6 +1077,14 @@ fun VideoPlayerScreen(
                         currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                         val dur = exoPlayer.duration.coerceAtLeast(0L)
                         if (dur > 0L) duration = dur
+
+                        val loopStart = abLoopStartMs
+                        val loopEnd = abLoopEndMs
+                        if (loopStart != null && loopEnd != null && currentPosition >= loopEnd) {
+                            exoPlayer.seekTo(loopStart)
+                            currentPosition = loopStart
+                        }
+
                         val video = latestCurrentVideo
                         if (shouldMarkWatched(currentPosition, dur)) {
                             repository.markWatched(video)
@@ -973,6 +1099,7 @@ fun VideoPlayerScreen(
                     player = null
                     runCatching { p.release() }
                 }
+                AudioEffectManager.releaseAll()
             }
         }
     }
@@ -989,9 +1116,10 @@ fun VideoPlayerScreen(
         p.seekTo(startPos)
         currentPosition = startPos
         
+        isFirstPlayPending = true
         p.prepare()
         p.setPlaybackSpeed(latestPlaybackSpeed)
-        p.playWhenReady = true
+        p.playWhenReady = false
     }
 
     // Periodically save playback progress for both ExoPlayer and VLC.
@@ -1022,6 +1150,7 @@ fun VideoPlayerScreen(
         onDispose {
             MainActivity.isVideoPlaying = false
             markIfWatched()
+            AudioEffectManager.releaseAll()
             activity?.let { act ->
                 act.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 // Restore screen brightness when leaving the player.
@@ -1068,38 +1197,76 @@ fun VideoPlayerScreen(
         }
     }
 
-    // 下拉时的动态缩放（最多缩到 0.88）和位移
-    val pullProgress = if (pullDownOffsetPx > 0f) (pullDownOffsetPx / 800f).coerceIn(0f, 1f) else 0f
-    val pullScale = 1f - pullProgress * 0.12f
-    // 下拉释放退出时，让透明度平滑过渡到 0f 消失
-    val pullAlpha = if (isExitingScreen) {
-        (1f - (pullDownOffsetPx / 1200f)).coerceIn(0f, 1f)
-    } else {
-        1f - pullProgress * 0.4f
-    }
-
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black)
             .onGloballyPositioned { coordinates ->
                 screenWidthPx = coordinates.size.width.toFloat()
             }
-            .graphicsLayer(
-                scaleX = if (isExitingScreen && pullDownOffsetPx == 0f) exitScale else pullScale,
-                scaleY = if (isExitingScreen && pullDownOffsetPx == 0f) exitScale else pullScale,
-                alpha = if (isExitingScreen && pullDownOffsetPx == 0f) exitAlpha else pullAlpha,
-                translationY = if (isExitingScreen && pullDownOffsetPx == 0f) 0f else pullDownOffsetPx
-            )
     ) {
+        // Backdrop (fades only)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .graphicsLayer {
+                    val dx = pullDownOffsetX
+                    val dy = pullDownOffsetY
+                    val dist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                    val progress = (dist / 800f).coerceIn(0f, 1f)
+                    alpha = if (isExitingScreen) {
+                        val currentAlpha = (1f - dist / 1200f).coerceIn(0f, 1f)
+                        if (dx == 0f && dy == 0f) exitAlpha else currentAlpha
+                    } else {
+                        1f - progress
+                    }
+                }
+        )
+
+        // Player content (scales, translates, and exits)
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    val dx = pullDownOffsetX
+                    val dy = pullDownOffsetY
+                    val dist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                    val useExitAnimation = isExitingScreen && dx == 0f && dy == 0f
+                    val progress = (dist / 800f).coerceIn(0f, 1f)
+                    val scale = 1f - progress * 0.25f
+                    scaleX = if (useExitAnimation) exitScale else scale
+                    scaleY = if (useExitAnimation) exitScale else scale
+                    alpha = if (useExitAnimation) {
+                        exitAlpha
+                    } else if (isExitingScreen) {
+                        (1f - dist / 1200f).coerceIn(0f, 1f)
+                    } else {
+                        1f
+                    }
+                    translationX = if (useExitAnimation) 0f else dx
+                    translationY = if (useExitAnimation) 0f else dy
+                }
+        ) {
         PlayerGestureOverlay(
             seekSeconds = skipSeconds,
             durationMs = duration,
             currentPositionMs = currentPosition,
-            isLocked = isScreenLocked,
+            isLocked = isScreenLocked || isZoomed || isSphericalMode,
             isEnabled = !MainActivity.isInPipMode.value,
             onSingleTap = { showControls = !showControls },
             onCenterDoubleTap = { togglePlayPause() },
+            onVolumePercentChange = { percent ->
+                virtualVolumePercent = percent
+                if (!useVlcFallback) {
+                    val p = player
+                    if (p != null) {
+                        val id = p.audioSessionId
+                        if (id != androidx.media3.common.C.AUDIO_SESSION_ID_UNSET) {
+                            AudioEffectManager.setVolumeBoost(id, percent)
+                        }
+                    }
+                }
+            },
             onDoubleTapSeek = { delta ->
                 val target = (currentPosition + delta).coerceIn(0L, duration.coerceAtLeast(0L))
                 val wasPlaying = isPlaying
@@ -1133,36 +1300,67 @@ fun VideoPlayerScreen(
             onLongPressSpeed = { active -> setPlaybackSpeedCompat(if (active) 2f else playbackSpeed) },
             onSwipeDrag = { dragX -> handleSwipeDrag(dragX) },
             onSwipeRelease = { totalDragX -> handleSwipeRelease(totalDragX) },
-            onPullDownDrag = { dy ->
-                pullDownOffsetPx = dy
+            onPullDownDrag = { dx, dy ->
+                pullDownOffsetX = dx
+                pullDownOffsetY = dy
             },
-            onPullDownRelease = { dy ->
+            onPullDownRelease = { dx, dy ->
                 scope.launch {
-                    if (dy > 200f) {
+                    val dist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+                    if (dist > 200f) {
                         // 拖拽距离足够 → 触发关闭，停止播放并保存进度
                         isExitingScreen = true
                         pauseCompat()
                         markIfWatched()
                         
-                        // 渐渐向下滑出屏幕，采用 ease-in 算法让过渡丝滑
-                        val start = pullDownOffsetPx
-                        val target = 2000f
-                        val steps = 18
-                        for (i in 1..steps) {
-                            val t = i.toFloat() / steps
-                            pullDownOffsetPx = start + (target - start) * (t * t)
-                            kotlinx.coroutines.delay(10)
+                        // 沿着滑动方向飞出屏幕
+                        val targetX = if (dist > 0f) (dx / dist) * 2000f else 0f
+                        val targetY = if (dist > 0f) (dy / dist) * 2000f else 2000f
+                        
+                        val jobX = launch {
+                            animate(
+                                initialValue = pullDownOffsetX,
+                                targetValue = targetX,
+                                animationSpec = tween(durationMillis = 180)
+                            ) { value, _ ->
+                                pullDownOffsetX = value
+                            }
                         }
+                        val jobY = launch {
+                            animate(
+                                initialValue = pullDownOffsetY,
+                                targetValue = targetY,
+                                animationSpec = tween(durationMillis = 180)
+                            ) { value, _ ->
+                                pullDownOffsetY = value
+                            }
+                        }
+                        jobX.join()
+                        jobY.join()
                         onBackClick()
                     } else {
-                        // 回弹
-                        val start = pullDownOffsetPx
-                        val steps = 12
-                        for (i in steps downTo 0) {
-                            pullDownOffsetPx = start * i / steps
-                            kotlinx.coroutines.delay(12)
+                        val jobX = launch {
+                            animate(
+                                initialValue = pullDownOffsetX,
+                                targetValue = 0f,
+                                animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f)
+                            ) { value, _ ->
+                                pullDownOffsetX = value
+                            }
                         }
-                        pullDownOffsetPx = 0f
+                        val jobY = launch {
+                            animate(
+                                initialValue = pullDownOffsetY,
+                                targetValue = 0f,
+                                animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f)
+                            ) { value, _ ->
+                                pullDownOffsetY = value
+                            }
+                        }
+                        jobX.join()
+                        jobY.join()
+                        pullDownOffsetX = 0f
+                        pullDownOffsetY = 0f
                     }
                 }
             }
@@ -1171,14 +1369,96 @@ fun VideoPlayerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .alpha(if (isExitingScreen && pullDownOffsetPx == 0f) exitAlpha else 1f)
-                    .graphicsLayer { translationX = swipeOffsetAnim.value }
+                    .alpha(if (isExitingScreen && pullDownOffsetX == 0f && pullDownOffsetY == 0f) exitAlpha else 1f)
+                    .pointerInput(isScreenLocked, isExitingScreen, isSphericalMode) {
+                        if (isScreenLocked || isExitingScreen || isSphericalMode) return@pointerInput
+                        if (zoomScale > 1.0f) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    zoomScale = 1.0f
+                                    zoomOffsetX = 0f
+                                    zoomOffsetY = 0f
+                                },
+                                onTap = { showControls = !showControls }
+                            )
+                        }
+                    }
+                    .pointerInput(isScreenLocked, isExitingScreen, isSphericalMode) {
+                        if (isScreenLocked || isExitingScreen || isSphericalMode) return@pointerInput
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var maxPointers = 1
+                            var pastSlop = false
+                            var zoom = 1f
+                            var pan = Offset.Zero
+                            val touchSlop = viewConfiguration.touchSlop
+                            do {
+                                val event = awaitPointerEvent()
+                                val pointerCount = event.changes.filter { it.pressed }.size
+                                if (pointerCount > maxPointers) {
+                                    maxPointers = pointerCount
+                                }
+                                
+                                val canceled = event.changes.any { it.isConsumed }
+                                if (!canceled) {
+                                    val zoomChange = event.calculateZoom()
+                                    val panChange = event.calculatePan()
+                                    
+                                    val isMultiTouch = pointerCount >= 2 || maxPointers >= 2
+                                    val shouldHandle = (zoomScale > 1.0f) || isMultiTouch
+                                    
+                                    if (shouldHandle) {
+                                        if (!pastSlop) {
+                                            zoom *= zoomChange
+                                            pan += panChange
+                                            val centroidSize = event.calculateCentroidSize(useCurrent = false)
+                                            val zoomMotion = abs(1 - zoom) * centroidSize
+                                            val panMotion = pan.getDistance()
+                                            
+                                            if (zoomMotion > touchSlop || panMotion > touchSlop || isMultiTouch) {
+                                                pastSlop = true
+                                            }
+                                        }
+                                        
+                                        if (pastSlop) {
+                                            val newScale = (zoomScale * zoomChange).coerceIn(1.0f, 4.0f)
+                                            zoomScale = newScale
+                                            
+                                            if (zoomScale > 1.0f) {
+                                                val maxOffsetX = (size.width * (zoomScale - 1f)) / 2f
+                                                val maxOffsetY = (size.height * (zoomScale - 1f)) / 2f
+                                                zoomOffsetX = (zoomOffsetX + panChange.x * zoomScale).coerceIn(-maxOffsetX, maxOffsetX)
+                                                zoomOffsetY = (zoomOffsetY + panChange.y * zoomScale).coerceIn(-maxOffsetY, maxOffsetY)
+                                            } else {
+                                                zoomOffsetX = 0f
+                                                zoomOffsetY = 0f
+                                            }
+                                            
+                                            event.changes.forEach {
+                                                if (it.positionChanged()) {
+                                                    it.consume()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } while (event.changes.any { it.pressed })
+                        }
+                    }
+                    .graphicsLayer {
+                        val swipeOffset = if (isSwipeDragging) swipeDragOffset else swipeOffsetAnim.value
+                        scaleX = zoomScale
+                        scaleY = zoomScale
+                        translationX = swipeOffset + zoomOffsetX
+                        translationY = zoomOffsetY
+                    }
             ) {
                 if (useVlcFallback) {
                     VlcPlayerSurface(
                         item = currentVideo,
                         startPosition = currentPosition,
                         playbackSpeed = playbackSpeed,
+                        volume = virtualVolumePercent,
                         onReady = { playerReadyFlow.tryEmit(Unit) },
                         onBindControls = { toggle, seek, speed, pause, _, _, setAudio, _, _, setSub, snapshot ->
                             vlcTogglePlayPause = toggle
@@ -1199,22 +1479,43 @@ fun VideoPlayerScreen(
                             if (!isWaitingForReady && !isScrubbing) {
                                 currentPosition = position
                                 if (length > 0L) duration = length
+
+                                val loopStart = abLoopStartMs
+                                val loopEnd = abLoopEndMs
+                                if (loopStart != null && loopEnd != null && currentPosition >= loopEnd) {
+                                    vlcSeekTo(loopStart)
+                                    currentPosition = loopStart
+                                }
                             }
                             isPlaying = playing
                         },
                         onEnded = {
-                            repository.markWatched(currentVideo)
-                            when {
-                                autoReplay -> {
-                                    seekToPosition(0L, force = true)
-                                    vlcTogglePlayPause()
+                            val loopStart = abLoopStartMs
+                            val loopEnd = abLoopEndMs
+                            if (loopStart != null && loopEnd != null) {
+                                seekToPosition(loopStart, force = true)
+                                if (!isPlaying) vlcTogglePlayPause()
+                            } else {
+                                repository.markWatched(currentVideo)
+                                when {
+                                    autoReplay -> {
+                                        seekToPosition(0L, force = true)
+                                        vlcTogglePlayPause()
+                                    }
+                                    autoPlayNext -> playNext.value()
                                 }
-                                autoPlayNext -> playNext.value()
                             }
                         },
                         onError = {
                             playbackError = "VLC fallback failed: $it"
                         }
+                    )
+                } else if (projectionMode != VideoProjectionMode.STANDARD) {
+                    SphericalVideoSurface(
+                        player = player,
+                        stereoMode = projectionMode.stereoMode ?: C.STEREO_MODE_MONO,
+                        useSensorRotation = useProjectionSensor,
+                        modifier = Modifier.fillMaxSize()
                     )
                 } else {
                     AndroidView(
@@ -1260,17 +1561,19 @@ fun VideoPlayerScreen(
 
             // Gesture overlay.
             val previewTargetIndex = swipeTargetIndex
-            if (previewTargetIndex != null && previewTargetIndex in playlist.indices && swipeOffsetAnim.value != 0f) {
+            if (previewTargetIndex != null && previewTargetIndex in playlist.indices) {
                 val targetVideo = playlist[previewTargetIndex]
-                val translationX = if (swipeOffsetAnim.value > 0) {
-                    -screenWidthPx + swipeOffsetAnim.value
-                } else {
-                    screenWidthPx + swipeOffsetAnim.value
-                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .graphicsLayer { this.translationX = translationX }
+                        .graphicsLayer {
+                            val swipeOffset = if (isSwipeDragging) swipeDragOffset else swipeOffsetAnim.value
+                            translationX = if (swipeOffset > 0f) {
+                                -screenWidthPx + swipeOffset
+                            } else {
+                                screenWidthPx + swipeOffset
+                            }
+                        }
                         .background(Color.Black),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1369,6 +1672,7 @@ fun VideoPlayerScreen(
                     indexText = "${currentIndex + 1} / ${playlist.size}",
                     isFavorite = isFavorite,
                     useVlcFallback = useVlcFallback,
+                    projectionMode = projectionMode,
                     sleepTimerText = sleepTimerText,
                     onBackClick = {
                         isExitingScreen = true
@@ -1376,6 +1680,10 @@ fun VideoPlayerScreen(
                     onFavoriteClick = {
                         isFavorite = !isFavorite
                         repository.setFavorite(currentVideo, isFavorite)
+                    },
+                    onProjectionClick = {
+                        val modes = VideoProjectionMode.entries
+                        updateProjectionMode(modes[(projectionMode.ordinal + 1) % modes.size])
                     }
                 )
             }
@@ -1475,7 +1783,10 @@ fun VideoPlayerScreen(
                     },
                     onSetCover = { selectCustomCover() },
                     onInfo = { showInfo = true },
-                    onSettings = { showSettings = true }
+                    onSettings = { showSettings = true },
+                    abLoopStartMs = abLoopStartMs,
+                    abLoopEndMs = abLoopEndMs,
+                    onAbLoopClick = { handleAbLoopClick() }
                 )
             }
 
@@ -1547,6 +1858,11 @@ fun VideoPlayerScreen(
             }
         }
 
+        ZoomScaleHud(
+            scaleState = zoomScaleState,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 70.dp)
+        )
+
         // 播放器手势教程覆盖层
         com.example.videoplayer.ui.components.PlayerTutorialOverlay(
             visible = showTutorial,
@@ -1556,6 +1872,7 @@ fun VideoPlayerScreen(
             }
         )
     }
+}
 
 
     if (showSettings) {
@@ -1564,7 +1881,7 @@ fun VideoPlayerScreen(
                 vlcAudioTracks.map { (id, name) ->
                     TrackOption(
                         id = "vlc_audio_$id",
-                        label = name.ifBlank { "闂婂疇寤?$id" },
+                        label = name.ifBlank { "音轨 $id" },
                         isSelected = vlcActiveAudioTrack == id,
                         onSelect = {
                             vlcSetAudioTrack(id)
@@ -1695,6 +2012,13 @@ fun VideoPlayerScreen(
             },
             resizeMode = resizeMode,
             onResizeModeChange = { resizeMode = it },
+            projectionMode = projectionMode,
+            onProjectionModeChange = { mode -> updateProjectionMode(mode) },
+            useProjectionSensor = useProjectionSensor,
+            onProjectionSensorChange = { enabled ->
+                useProjectionSensor = enabled
+                repository.setProjectionSensorEnabled(currentVideo, enabled)
+            },
             onFrameStep = { frames ->
                 pauseCompat()
                 val target = (currentPosition + frames * 33L).coerceIn(0L, duration.coerceAtLeast(0L))
@@ -1710,6 +2034,19 @@ fun VideoPlayerScreen(
             },
             audioOptions = audioOptions,
             subtitleOptions = subtitleOptions,
+            currentPreset = currentEqPreset,
+            onPresetChange = { preset ->
+                currentEqPreset = preset
+                if (!useVlcFallback) {
+                    val p = player
+                    if (p != null) {
+                        val id = p.audioSessionId
+                        if (id != androidx.media3.common.C.AUDIO_SESSION_ID_UNSET) {
+                            AudioEffectManager.applyPreset(id, preset)
+                        }
+                    }
+                }
+            },
             isBackgroundPlayEnabled = isBackgroundPlayEnabled,
             onBackgroundPlayChange = {
                 isBackgroundPlayEnabled = it
@@ -1752,7 +2089,7 @@ fun VideoPlayerScreen(
         CastDeviceSelectionDialog(
             onDismiss = { showCastDialog = false },
             onDeviceSelected = { device ->
-                DlnaCastManager.startCast(context, device, currentVideo, currentPosition)
+                DlnaCastManager.startCast(device, currentVideo, currentPosition)
                 castDeviceName = device.friendlyName
                 isCasting = true
                 showCastDialog = false
@@ -1805,7 +2142,7 @@ fun VideoPlayerScreen(
                     val device = DlnaCastManager.selectedDevice
                     DlnaCastManager.stopCast()
                     if (device != null) {
-                        DlnaCastManager.startCast(context, device, newVideo, 0L)
+                        DlnaCastManager.startCast(device, newVideo, 0L)
                     }
                     castPosition = 0L
                     castDuration = newVideo.duration
@@ -1820,7 +2157,7 @@ fun VideoPlayerScreen(
                     val device = DlnaCastManager.selectedDevice
                     DlnaCastManager.stopCast()
                     if (device != null) {
-                        DlnaCastManager.startCast(context, device, newVideo, 0L)
+                        DlnaCastManager.startCast(device, newVideo, 0L)
                     }
                     castPosition = 0L
                     castDuration = newVideo.duration
@@ -1868,6 +2205,39 @@ private fun shouldMarkWatched(positionMs: Long, durationMs: Long): Boolean {
     val remainingMs = durationMs - positionMs
     val thresholdMs = if (durationMs <= 30_000L) 500L else maxOf(3_000L, (durationMs * 0.1f).toLong())
     return remainingMs <= thresholdMs
+}
+
+private fun inferProjectionMode(item: PlayerMediaItem): VideoProjectionMode {
+    val source = "${item.displayName} ${item.path}".lowercase(Locale.ROOT)
+    val tokens = source.split(Regex("[^a-z0-9]+"))
+    val looksSpherical = tokens.any { it == "360" || it == "360vr" || it == "vr360" } ||
+        "equirectangular" in source || "全景" in source
+    if (!looksSpherical) return VideoProjectionMode.STANDARD
+
+    return when {
+        tokens.any { it == "sbs" || it == "hsbs" || it == "lr" } || "side by side" in source ->
+            VideoProjectionMode.SPHERE_SBS
+        tokens.any { it == "tb" || it == "tab" || it == "ou" } || "top bottom" in source ->
+            VideoProjectionMode.SPHERE_TOP_BOTTOM
+        else -> VideoProjectionMode.SPHERE_MONO
+    }
+}
+
+private fun findEmbeddedProjectionMode(tracks: Tracks): VideoProjectionMode? {
+    tracks.groups.forEach { group ->
+        if (group.type != C.TRACK_TYPE_VIDEO) return@forEach
+        for (index in 0 until group.length) {
+            val format = group.getTrackFormat(index)
+            val hasProjectionMetadata = format.projectionData != null
+            when (format.stereoMode) {
+                C.STEREO_MODE_LEFT_RIGHT -> return VideoProjectionMode.SPHERE_SBS
+                C.STEREO_MODE_TOP_BOTTOM -> return VideoProjectionMode.SPHERE_TOP_BOTTOM
+                C.STEREO_MODE_MONO -> if (hasProjectionMetadata) return VideoProjectionMode.SPHERE_MONO
+            }
+            if (hasProjectionMetadata) return VideoProjectionMode.SPHERE_MONO
+        }
+    }
+    return null
 }
 
 private fun shouldPreferVlcEngine(item: PlayerMediaItem): Boolean {
@@ -1983,7 +2353,9 @@ private fun ExactVideoSeekBar(
     durationMs: Long,
     modifier: Modifier = Modifier,
     onSeek: (Long) -> Unit,
-    onSeekFinished: (Long) -> Unit
+    onSeekFinished: (Long) -> Unit,
+    abLoopStartMs: Long?,
+    abLoopEndMs: Long?
 ) {
     var widthPx by remember { mutableIntStateOf(0) }
     var dragTargetMs by remember { mutableLongStateOf(positionMs) }
@@ -2031,18 +2403,57 @@ private fun ExactVideoSeekBar(
         val trackTop = (size.height - trackHeight) / 2f
         val progress = if (durationMs > 0L) shownPosition.toFloat() / durationMs.toFloat() else 0f
         val progressWidth = size.width * progress.coerceIn(0f, 1f)
+
+        // Draw track background
         drawRoundRect(
             color = Color.White.copy(alpha = 0.2f),
             topLeft = Offset(0f, trackTop),
             size = Size(size.width, trackHeight),
             cornerRadius = CornerRadius(trackHeight, trackHeight)
         )
+
+        // Draw A-B loop highlight region
+        val startFrac = if (durationMs > 0L && abLoopStartMs != null) abLoopStartMs.toFloat() / durationMs.toFloat() else null
+        val endFrac = if (durationMs > 0L && abLoopEndMs != null) abLoopEndMs.toFloat() / durationMs.toFloat() else null
+        if (startFrac != null && endFrac != null) {
+            val abLeft = startFrac * size.width
+            val abRight = endFrac * size.width
+            drawRect(
+                color = SecondaryNeonCyan.copy(alpha = 0.35f),
+                topLeft = Offset(abLeft, trackTop - 2.dp.toPx()),
+                size = Size(abRight - abLeft, trackHeight + 4.dp.toPx())
+            )
+        }
+
+        // Draw progress track
         drawRoundRect(
             color = SecondaryNeonCyan,
             topLeft = Offset(0f, trackTop),
             size = Size(progressWidth, trackHeight),
             cornerRadius = CornerRadius(trackHeight, trackHeight)
         )
+
+        // Draw A-B tick markers
+        if (startFrac != null) {
+            val aX = startFrac * size.width
+            drawLine(
+                color = SecondaryNeonCyan,
+                start = Offset(aX, trackTop - 6.dp.toPx()),
+                end = Offset(aX, trackTop + trackHeight + 6.dp.toPx()),
+                strokeWidth = 2.dp.toPx()
+            )
+        }
+        if (endFrac != null) {
+            val bX = endFrac * size.width
+            drawLine(
+                color = SecondaryNeonCyan,
+                start = Offset(bX, trackTop - 6.dp.toPx()),
+                end = Offset(bX, trackTop + trackHeight + 6.dp.toPx()),
+                strokeWidth = 2.dp.toPx()
+            )
+        }
+
+        // Draw progress thumb circle
         drawCircle(
             color = Color.White,
             radius = 7.dp.toPx(),
@@ -2276,10 +2687,65 @@ private fun openCastSettings(context: android.content.Context) {
 
 
 @Composable
+private fun SphericalVideoSurface(
+    player: ExoPlayer?,
+    stereoMode: Int,
+    useSensorRotation: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    var surfaceView by remember { mutableStateOf<SphericalGLSurfaceView?>(null) }
+
+    AndroidView(
+        factory = { context ->
+            SphericalGLSurfaceView(context).also { view ->
+                view.setDefaultStereoMode(stereoMode)
+                view.setUseSensorRotation(useSensorRotation)
+                surfaceView = view
+            }
+        },
+        update = { view ->
+            view.setDefaultStereoMode(stereoMode)
+            view.setUseSensorRotation(useSensorRotation)
+            player?.setVideoSurfaceView(view)
+        },
+        modifier = modifier
+    )
+
+    DisposableEffect(player, surfaceView) {
+        val view = surfaceView
+        if (view != null) player?.setVideoSurfaceView(view)
+        onDispose {
+            if (view != null) player?.clearVideoSurfaceView(view)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, surfaceView) {
+        val view = surfaceView
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            view?.onResume()
+        }
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> view?.onResume()
+                Lifecycle.Event.ON_PAUSE -> view?.onPause()
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            view?.onPause()
+        }
+    }
+}
+
+@Composable
 private fun VlcPlayerSurface(
     item: PlayerMediaItem,
     startPosition: Long,
     playbackSpeed: Float,
+    volume: Int = 100,
     onReady: () -> Unit = {},
     onBindControls: (
         togglePlayPause: () -> Unit,
@@ -2330,6 +2796,12 @@ private fun VlcPlayerSurface(
     }
     val mediaPlayer = remember { VlcMediaPlayer(libVlc) }
 
+    LaunchedEffect(volume) {
+        runCatching {
+            mediaPlayer.volume = volume.coerceIn(0, 200)
+        }
+    }
+
     // Mount the SurfaceView once.
     AndroidView(
         factory = { ctx ->
@@ -2346,14 +2818,16 @@ private fun VlcPlayerSurface(
     DisposableEffect(item) {
         var tracksEnumerated = false
 
+        fun publishState(playing: Boolean? = null) {
+            val position = mediaPlayer.time.coerceAtLeast(0L)
+            val length = mediaPlayer.length.coerceAtLeast(0L)
+            latestOnState(position, length, playing ?: mediaPlayer.isPlaying)
+        }
+
         mediaPlayer.setEventListener { event ->
             when (event.type) {
                 VlcMediaPlayer.Event.Playing -> {
-                    latestOnState(
-                        mediaPlayer.time.coerceAtLeast(0L),
-                        mediaPlayer.length.coerceAtLeast(0L),
-                        true
-                    )
+                    publishState(playing = true)
                     latestOnReady()
                     // Enumerate tracks only on the first Playing event to avoid JNI churn.
                     if (!tracksEnumerated) {
@@ -2366,11 +2840,7 @@ private fun VlcPlayerSurface(
                     }
                 }
                 VlcMediaPlayer.Event.Paused -> {
-                    latestOnState(
-                        mediaPlayer.time.coerceAtLeast(0L),
-                        mediaPlayer.length.coerceAtLeast(0L),
-                        false
-                    )
+                    publishState(playing = false)
                 }
                 VlcMediaPlayer.Event.Stopped -> {
                     latestOnState(0L, mediaPlayer.length.coerceAtLeast(0L), false)
@@ -2378,11 +2848,7 @@ private fun VlcPlayerSurface(
                 VlcMediaPlayer.Event.TimeChanged,
                 VlcMediaPlayer.Event.LengthChanged -> {
                     // Normalize native callback values before updating Compose state.
-                    latestOnState(
-                        mediaPlayer.time.coerceAtLeast(0L),
-                        mediaPlayer.length.coerceAtLeast(0L),
-                        mediaPlayer.isPlaying
-                    )
+                    publishState()
                 }
                 VlcMediaPlayer.Event.EndReached -> latestOnEnded()
                 VlcMediaPlayer.Event.EncounteredError -> latestOnError("EncounteredError")
@@ -2393,16 +2859,16 @@ private fun VlcPlayerSurface(
         onBindControls(
             {
                 if (mediaPlayer.isPlaying) mediaPlayer.pause() else mediaPlayer.play()
-                latestOnState(mediaPlayer.time.coerceAtLeast(0L), mediaPlayer.length.coerceAtLeast(0L), mediaPlayer.isPlaying)
+                publishState()
             },
             { target ->
                 mediaPlayer.time = target.coerceAtLeast(0L)
-                latestOnState(mediaPlayer.time.coerceAtLeast(0L), mediaPlayer.length.coerceAtLeast(0L), mediaPlayer.isPlaying)
+                publishState()
             },
             { speed -> mediaPlayer.setRate(speed) },
             {
                 mediaPlayer.pause()
-                latestOnState(mediaPlayer.time.coerceAtLeast(0L), mediaPlayer.length.coerceAtLeast(0L), mediaPlayer.isPlaying)
+                publishState(playing = false)
             },
             { mediaPlayer.audioTracks?.map { it.id to it.name } ?: emptyList() },
             { mediaPlayer.audioTrack },
@@ -2477,6 +2943,45 @@ private fun VlcPlayerSurface(
     }
 }
 
+@Composable
+private fun ZoomScaleHud(
+    scaleState: State<Float>,
+    modifier: Modifier = Modifier
+) {
+    val scale = scaleState.value
+    AnimatedVisibility(
+        visible = scale > 1.0f,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = modifier
+    ) {
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.Black.copy(alpha = 0.8f))
+                .padding(horizontal = 14.dp, vertical = 6.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ZoomIn,
+                    contentDescription = null,
+                    tint = SecondaryNeonCyan,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    text = "缩放: ${String.format("%.1f", scale)}x (双击重置)",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
 // UI controls
 
 
@@ -2487,9 +2992,11 @@ private fun TopControls(
     indexText: String,
     isFavorite: Boolean,
     useVlcFallback: Boolean,
+    projectionMode: VideoProjectionMode,
     sleepTimerText: String?,
     onBackClick: () -> Unit,
-    onFavoriteClick: () -> Unit
+    onFavoriteClick: () -> Unit,
+    onProjectionClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -2521,6 +3028,31 @@ private fun TopControls(
                     }
                 }
             }
+        }
+        TextButton(
+            onClick = onProjectionClick,
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    if (projectionMode == VideoProjectionMode.STANDARD) {
+                        Color.White.copy(alpha = 0.08f)
+                    } else {
+                        PrimaryNeonPurple.copy(alpha = 0.28f)
+                    }
+                )
+        ) {
+            Text(
+                text = when (projectionMode) {
+                    VideoProjectionMode.STANDARD -> "2D"
+                    VideoProjectionMode.SPHERE_MONO -> "360°"
+                    VideoProjectionMode.SPHERE_SBS -> "360° 3D"
+                    VideoProjectionMode.SPHERE_TOP_BOTTOM -> "360° 3D↕"
+                },
+                color = if (projectionMode == VideoProjectionMode.STANDARD) TextSecondary else Color.White,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
         IconButton(onClick = onFavoriteClick) {
             Icon(
@@ -2554,7 +3086,10 @@ private fun BottomControls(
     onGif: () -> Unit,
     onSetCover: () -> Unit,
     onInfo: () -> Unit,
-    onSettings: () -> Unit
+    onSettings: () -> Unit,
+    abLoopStartMs: Long?,
+    abLoopEndMs: Long?,
+    onAbLoopClick: () -> Unit
 ) {
     var showSpeedPanel by remember { mutableStateOf(false) }
 
@@ -2594,7 +3129,9 @@ private fun BottomControls(
                         delay(300)
                         isDragging = false
                     }
-                }
+                },
+                abLoopStartMs = abLoopStartMs,
+                abLoopEndMs = abLoopEndMs
             )
             Text(formatDuration(duration), color = Color.White, fontSize = 11.sp)
         }
@@ -2647,6 +3184,18 @@ private fun BottomControls(
                     }
                     IconButton(onClick = onInfo) {
                         Icon(Icons.Default.Info, contentDescription = "视频信息", tint = Color.White)
+                    }
+                    TextButton(onClick = onAbLoopClick) {
+                        Text(
+                            text = when {
+                                abLoopStartMs != null && abLoopEndMs != null -> "A-B"
+                                abLoopStartMs != null -> "A-"
+                                else -> "A-B"
+                            },
+                            color = if (abLoopStartMs != null) SecondaryNeonCyan else Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                     TextButton(onClick = { showSpeedPanel = !showSpeedPanel }) {
                         Text("${playbackSpeed}x", color = Color.White, fontSize = 12.sp)
@@ -2703,11 +3252,17 @@ private fun PlayerSettingsDialog(
     onPlaybackSpeedChange: (Float) -> Unit,
     resizeMode: Int,
     onResizeModeChange: (Int) -> Unit,
+    projectionMode: VideoProjectionMode,
+    onProjectionModeChange: (VideoProjectionMode) -> Unit,
+    useProjectionSensor: Boolean,
+    onProjectionSensorChange: (Boolean) -> Unit,
     onFrameStep: (Int) -> Unit,
     useVlcFallback: Boolean,
     onToggleDecoder: () -> Unit,
     audioOptions: List<TrackOption>,
     subtitleOptions: List<TrackOption>,
+    currentPreset: String,
+    onPresetChange: (String) -> Unit,
     isBackgroundPlayEnabled: Boolean,
     onBackgroundPlayChange: (Boolean) -> Unit,
     isPipEnabled: Boolean,
@@ -2794,6 +3349,20 @@ private fun PlayerSettingsDialog(
                     }
                 }
 
+                // Equalizer presets for ExoPlayer mode
+                if (!useVlcFallback) {
+                    Text("声音均衡器预设", color = Color.White, fontWeight = FontWeight.Bold)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("Normal", "Bass Boost", "Vocal Clear", "Rock", "Pop", "Classical").forEach { preset ->
+                            FilterChip(
+                                selected = currentPreset == preset,
+                                onClick = { onPresetChange(preset) },
+                                label = { Text(preset) }
+                            )
+                        }
+                    }
+                }
+
                 Text("播放速度", color = Color.White, fontWeight = FontWeight.Bold)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f, 3f).forEach { speed ->
@@ -2811,6 +3380,24 @@ private fun PlayerSettingsDialog(
                             FilterChip(selected = resizeMode == mode, onClick = { onResizeModeChange(mode) }, label = { Text(label) })
                         }
                     }
+                }
+                Text("360° / 3D 投影", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(
+                    "用于等距柱状全景视频；左右/上下模式会按立体布局选择正确视图，并支持触摸和陀螺仪转动。",
+                    color = TextSecondary,
+                    fontSize = 11.sp
+                )
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    VideoProjectionMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = projectionMode == mode,
+                            onClick = { onProjectionModeChange(mode) },
+                            label = { Text(mode.label) }
+                        )
+                    }
+                }
+                if (projectionMode != VideoProjectionMode.STANDARD) {
+                    SettingSwitch("跟随手机陀螺仪转动", useProjectionSensor, onProjectionSensorChange)
                 }
                 Text("逐帧控制", color = Color.White, fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

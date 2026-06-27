@@ -36,6 +36,7 @@
 * **双击屏幕 — 播放与暂停**。
 * **长按屏幕 — 2.0x 倍速播放**：松开即自动恢复正常速度。
 * **手势锁功能**：一键锁定屏幕交互，防止单手握持或侧卧时误触。
+* **Telegram 式 2D 滑动关闭与背景淡出**：支持左上角 $1/3$ 宽高区域内任意方向滑动关闭视频。窗口 X/Y 轴完美双向跟手平移，伴随背景遮罩的独立线性淡出（透视底下视频列表页）与自适应缩放，释放时支持惯性飞出与弹簧回弹。
 
 ### 3. 🎵 音效管理器与均衡器 (AudioEffectManager)
 * **超级音量增幅**：利用 Android 原生 `LoudnessEnhancer` 算法对音频流进行数字增益，最高可无失真提升音量至 **200%**。
@@ -52,11 +53,13 @@
 
 ### 5. 🔲 悬浮窗 / 迷你画中画 (FloatingPlayerService)
 * **系统窗口级悬浮 (WindowManager Overlay)**：即使退回桌面或切换到其他 App，视频依然能在最上层流畅播放。
-* **画中画手势交互**：支持在悬浮窗口上直接通过手势双击暂停、长按关闭，或一键无缝还原回应用全屏。
+* **竖屏视频小窗自适应**：智能提取并匹配实际视频比例，解决传统播放器悬浮窗渲染竖屏视频拉伸变形的问题。
+* **画中画手势与控制优化**：支持轻点小窗切换（Toggle）控制栏显示/隐藏，无操作自动隐藏时间缩短至更清爽的 2.0 秒；小窗支持双击左/右侧快退/快进 10 秒。
 * **Android 8.0+ Native PiP**：同时适配系统级标准画中画模式，适合更严格的后台多任务场景。
 
 ### 6. 📁 全能媒体资产扫描与管理 (MediaRepository)
-* **全盘智能扫描**：自动归类本地存储中的所有视频、音频与照片，采用文件夹树状视图与扁平化网格展示。
+* **全盘智能扫描与多维视图**：自动归类本地存储中的所有视频、音频与照片，采用文件夹树状视图与网格展示。
+* **苹果相册拼贴画廊模式 (Apple Photos Layout Mode)**：新增沉浸画廊网格视图，视频缩略图零边距紧密贴合连结（1.5dp 间距），完全隐藏文字标题。支持双指捏合手势（Pinch to Zoom）在 **2 - 12 列** 间动态平滑缩放与记忆。
 * **视频转动图 (GIF Encoder)**：内置快速 GIF 截取编码器，可将正在播放的视频片段快速导出为高画质的 GIF 动图。
 * **偏好记录与历史**：自动保存并恢复每个视频的播放历史进度，支持收藏夹管理。
 
@@ -152,6 +155,7 @@ videoplayer/
 * **Double-Tap**: Play/Pause toggle.
 * **Long-Press**: Instant 2.0x playback speed. Restores normal speed upon release.
 * **Gesture Lock**: Lock UI interaction to avoid accidental touches while holding the device.
+* **Telegram-style 2D Dismiss Gesture & Background Parallax**: Drag-to-dismiss in any direction (horizontal, vertical, diagonal) starting from the top-left 1/3 quadrant. Parallax 2D follow-finger window offset (`translationX` and `translationY`) combined with distance-based scaling (scales down up to 25%) and independent background alpha fade (1.0 to 0.0) to reveal the underlying playlist. Features spring-loaded snap-back or direction-driven inertial fly-out animation (up to 2000px in 180ms) upon release.
 
 ### 3. 🎵 Audio Effects Manager (AudioEffectManager)
 * **Safe Volume Booster**: Employs Android's native `LoudnessEnhancer` API to achieve clean, distortion-free digital gain up to **200%**.
@@ -168,11 +172,13 @@ videoplayer/
 
 ### 5. 🔲 System Floating Window / PIP (FloatingPlayerService)
 * **System Overlay Floating Panel (WindowManager Overlay)**: Enjoy overlay video windows on top of other applications or the launcher.
-* **Intuitive PiP Gestures**: Support window dragging, double-tapping to pause, long-pressing to exit, and single-click restoration back to fullscreen.
+* **Portrait Video Adaptation**: Automatically extracts and parses native video dimensions to adapt overlay proportions, fully supporting vertical videos without distortion.
+* **PiP Control Optimizations**: Single-tap window to toggle control panel visibility, with a shortened 2.0s auto-hide timeout; double-tap left/right half to seek backward/forward by 10s; supports dragging, long-pressing to exit, and single-click full-screen restoration.
 * **Standard Android 8.0+ Native PiP**: Fallback compatibility with standard system PiP frames.
 
 ### 6. 📁 Smart Media Library & Utilities
-* **Auto-Discovery Scanning**: Fast background local file indexing that automatically parses and organizes videos, audios, and photos into folder structures, histories, and favorites.
+* **Auto-Discovery Scanning & Multi-Views**: Fast background local file indexing that organizes videos, audios, and photos into folders, histories, and favorites.
+* **Apple Photos Gallery Layout Mode**: Implements a dense, seamless grid collage (1.5dp gap, no card margins/corners) hiding titles and labels. Supports fluid two-finger Pinch-to-Zoom gestures to adjust grid density dynamically between **2 and 12 columns** (with memory states).
 * **Video to GIF Exporter**: Easily extract video clips and encode them directly into high-fidelity animated GIFs.
 * **Audio Visualizer**: Audio playback suite featuring rich frequency visualizers and playback queues.
 

@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -49,7 +50,6 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.Spring
 import androidx.compose.ui.graphics.graphicsLayer
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
@@ -92,8 +92,8 @@ fun MediaItemCard(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.975f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -290,8 +290,8 @@ fun MediaGridTile(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.95f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.965f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -423,6 +423,133 @@ fun MediaGridTile(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun MediaGalleryTile(
+    item: MediaItem,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    isSelected: Boolean = false,
+    progressFraction: Float = 0f,
+    onLongClick: (() -> Unit)? = null
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.965f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
+        label = "scale"
+    )
+
+    Box(
+        modifier = modifier
+            .aspectRatio(1f)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = androidx.compose.foundation.LocalIndication.current,
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+    ) {
+        if (item.type == MediaType.AUDIO) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF13151D)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.MusicNote,
+                    contentDescription = null,
+                    tint = SecondaryNeonCyan,
+                    modifier = Modifier.size(32.dp)
+                )
+            }
+        } else {
+            LightweightMediaPreview(item = item, contentDescription = null)
+        }
+
+        if (item.type == MediaType.VIDEO) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .padding(horizontal = 4.dp, vertical = 1.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(8.dp)
+                    )
+                    Text(
+                        formatDuration(item.duration),
+                        color = Color.White,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        if (progressFraction > 0f && progressFraction < 0.98f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(2.5.dp)
+                    .background(Color.White.copy(alpha = 0.15f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(progressFraction)
+                        .background(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(PrimaryNeonPurple, SecondaryNeonCyan)
+                            )
+                        )
+                )
+            }
+        }
+
+        if (isSelected) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(SecondaryNeonCyan.copy(alpha = 0.15f))
+                    .border(2.dp, SecondaryNeonCyan)
+            )
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+                    .size(16.dp)
+                    .clip(CircleShape)
+                    .background(SecondaryNeonCyan),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = null,
+                    tint = Color.Black,
+                    modifier = Modifier.size(12.dp)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun MediaTypeChip(type: MediaType) {
     val text = when (type) {
@@ -462,8 +589,8 @@ fun FolderCard(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.975f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -541,8 +668,8 @@ fun FolderGridTile(
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.95f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        targetValue = if (isPressed) 0.965f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "scale"
     )
 
@@ -976,7 +1103,7 @@ object VideoThumbnailCache : android.content.ComponentCallbacks2 {
             val resolution = if (w > 0 && h > 0) "${w}x${h}" else ""
             
             if (dur > 0L || resolution.isNotBlank()) {
-                val repository = MediaRepository(context)
+                val repository = MediaRepository(context.applicationContext)
                 repository.saveMetadata(item, dur, resolution)
             }
         } catch (e: Exception) {

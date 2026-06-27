@@ -230,6 +230,7 @@ private fun ZoomablePhoto(
     var dragOffsetY by remember { mutableStateOf(0f) }
     val animateOffsetY = remember { androidx.compose.animation.core.Animatable(0f) }
     val scope = rememberCoroutineScope()
+    val latestOnSwipeOffsetChanged by rememberUpdatedState(onSwipeOffsetChanged)
 
     // Reset zoom when photo changes
     LaunchedEffect(photo) {
@@ -242,8 +243,12 @@ private fun ZoomablePhoto(
 
     val currentOffsetY = if (dragOffsetY != 0f) dragOffsetY else animateOffsetY.value
 
-    LaunchedEffect(currentOffsetY) {
-        onSwipeOffsetChanged(currentOffsetY)
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            if (dragOffsetY != 0f) dragOffsetY else animateOffsetY.value
+        }.collect { offsetY ->
+            latestOnSwipeOffsetChanged(offsetY)
+        }
     }
 
     val swipeScale = (1f - kotlin.math.abs(currentOffsetY) / 1500f).coerceIn(0.7f, 1f)
@@ -251,7 +256,7 @@ private fun ZoomablePhoto(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(photo, scale) {
+            .pointerInput(photo) {
                 awaitPointerEventScope {
                     while (true) {
                         val down = awaitFirstDown()

@@ -23,21 +23,22 @@ fun GlassmorphicCard(
     shadowElevation: Dp = 4.dp,
     content: @Composable BoxScope.() -> Unit
 ) {
+    val shape = RoundedCornerShape(cornerRadius)
     Box(
         modifier = modifier
             .shadow(
                 elevation = shadowElevation,
-                shape = RoundedCornerShape(cornerRadius),
+                shape = shape,
                 clip = false,
-                ambientColor = Color.Black,
-                spotColor = Color.Black
+                ambientColor = PrimaryNeonPurple.copy(alpha = 0.08f),
+                spotColor = Color.Black.copy(alpha = 0.8f)
             )
-            .clip(RoundedCornerShape(cornerRadius))
+            .clip(shape)
             .background(
                 brush = Brush.verticalGradient(
                     colors = listOf(
-                        CarbonCard.copy(alpha = 0.85f),
-                        CarbonCard.copy(alpha = 0.65f)
+                        Color(0xFF191C25).copy(alpha = 0.94f),
+                        CarbonCard.copy(alpha = 0.82f)
                     )
                 )
             )
@@ -45,12 +46,28 @@ fun GlassmorphicCard(
                 width = borderWidth,
                 brush = Brush.linearGradient(
                     colors = listOf(
-                        CarbonBorder,
-                        Color(0x05FFFFFF),
-                        CarbonBorder.copy(alpha = 0.6f)
+                        Color.White.copy(alpha = 0.14f),
+                        SecondaryNeonCyan.copy(alpha = 0.06f),
+                        Color.White.copy(alpha = 0.035f)
                     )
                 ),
-                shape = RoundedCornerShape(cornerRadius)
+                shape = shape
+            ),
+        content = content
+    )
+}
+
+@Composable
+fun AppBackground(
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0xFF0D0F16), CarbonBg, Color(0xFF08090C))
+                )
             ),
         content = content
     )

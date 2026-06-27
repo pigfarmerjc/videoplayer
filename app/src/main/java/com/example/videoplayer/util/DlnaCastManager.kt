@@ -36,7 +36,9 @@ object DlnaCastManager {
     var currentVideoFile: File? = null
     private var localServer: LocalHttpServer? = null
     private var discoveryJob: Job? = null
+    private var castJob: Job? = null
     private var pollingJob: Job? = null
+    @Volatile private var discoverySocket: DatagramSocket? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     // Start scanning local network devices
@@ -45,6 +47,7 @@ object DlnaCastManager {
         discoveryJob?.cancel()
         discoveryJob = scope.launch {
             var multicastLock: WifiManager.MulticastLock? = null
+            var socket: DatagramSocket? = null
             try {
                 val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                 multicastLock = wifiManager.createMulticastLock("DlnaSsdpLock").apply {
@@ -52,8 +55,10 @@ object DlnaCastManager {
                     acquire()
                 }
                 
-                val socket = DatagramSocket()
-                socket.soTimeout = 3000
+                val activeSocket = DatagramSocket()
+                socket = activeSocket
+                discoverySocket = activeSocket
+                activeSocket.soTimeout = 3000
                 
                 // standard MediaRenderer search
                 val msearch = "M-SEARCH * HTTP/1.1\r\n" +
@@ -75,9 +80,9 @@ object DlnaCastManager {
                 val packet1 = DatagramPacket(msearch.toByteArray(), msearch.length, targetAddress, 1900)
                 val packet2 = DatagramPacket(msearchAll.toByteArray(), msearchAll.length, targetAddress, 1900)
                 
-                socket.send(packet1)
+                activeSocket.send(packet1)
                 delay(100)
-                socket.send(packet2)
+                activeSocket.send(packet2)
                 
                 val buffer = ByteArray(2048)
                 val receivePacket = DatagramPacket(buffer, buffer.size)
@@ -86,7 +91,7 @@ object DlnaCastManager {
                 
                 while (System.currentTimeMillis() - startTime < 6000 && isActive) {
                     try {
-                        socket.receive(receivePacket)
+                        activeSocket.receive(receivePacket)
                         val response = String(receivePacket.data, 0, receivePacket.length)
                         val location = getHeaderValue(response, "LOCATION")
                         if (location != null && processedLocations.add(location)) {
@@ -110,6 +115,8 @@ object DlnaCastManager {
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
+                socket?.close()
+                if (discoverySocket === socket) discoverySocket = null
                 try {
                     multicastLock?.release()
                 } catch (e: Exception) {}
@@ -120,6 +127,8 @@ object DlnaCastManager {
     fun stopDiscovery() {
         discoveryJob?.cancel()
         discoveryJob = null
+        discoverySocket?.close()
+        discoverySocket = null
     }
     
     private suspend fun fetchDeviceDetails(locationUrl: String): DlnaDevice? = withContext(Dispatchers.IO) {
@@ -182,7 +191,9 @@ object DlnaCastManager {
     }
     
     // Connect to DLNA device and start streaming
-    fun startCast(context: Context, device: DlnaDevice, video: MediaItem, startPosMs: Long) {
+    fun startCast(device: DlnaDevice, video: MediaItem, startPosMs: Long) {
+        castJob?.cancel()
+        pollingJob?.cancel()
         selectedDevice = device
         isCasting = true
         isPlaying = true
@@ -199,7 +210,7 @@ object DlnaCastManager {
         val videoUrl = "http://$localIp:$port/video_${video.id}.mp4"
         castUrl = videoUrl
         
-        scope.launch {
+        castJob = scope.launch {
             // Set URI with DIDL metadata
             val didl = "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">" +
                     "<item id=\"0\" parentID=\"-1\" restricted=\"false\">" +
@@ -237,7 +248,9 @@ object DlnaCastManager {
             sendSoapAction(device.avTransportUrl, "urn:schemas-upnp-org:service:AVTransport:1", "Play", playArgs)
             
             // Start periodic polling for progress sync
-            startPolling()
+            if (isActive && isCasting && selectedDevice == device) {
+                startPolling()
+            }
         }
     }
     
@@ -293,6 +306,8 @@ object DlnaCastManager {
     
     fun stopCast() {
         val device = selectedDevice
+        castJob?.cancel()
+        castJob = null
         pollingJob?.cancel()
         pollingJob = null
         
@@ -496,11 +511,20 @@ class LocalHttpServer(private val fileProvider: () -> File?, private val port: I
                 val rangeStr = rangeHeader.substringAfter("bytes=")
                 val rangeParts = rangeStr.split("-")
                 val start = rangeParts[0].toLongOrNull() ?: 0L
-                val end = if (rangeParts.size > 1 && rangeParts[1].isNotEmpty()) {
+                val requestedEnd = if (rangeParts.size > 1 && rangeParts[1].isNotEmpty()) {
                     rangeParts[1].toLongOrNull() ?: (fileLength - 1)
                 } else {
                     fileLength - 1
                 }
+                if (start < 0L || start >= fileLength || requestedEnd < start) {
+                    val header = "HTTP/1.1 416 Range Not Satisfiable\r\n" +
+                        "Content-Range: bytes */$fileLength\r\n" +
+                        "Content-Length: 0\r\n\r\n"
+                    output.write(header.toByteArray())
+                    output.flush()
+                    return
+                }
+                val end = requestedEnd.coerceAtMost(fileLength - 1)
                 
                 val contentRange = "bytes $start-$end/$fileLength"
                 val contentLength = end - start + 1
@@ -525,7 +549,6 @@ class LocalHttpServer(private val fileProvider: () -> File?, private val port: I
                         val read = raf.read(buffer, 0, readSize)
                         if (read == -1) break
                         output.write(buffer, 0, read)
-                        output.flush()
                         bytesRemaining -= read
                     }
                 }
@@ -546,10 +569,10 @@ class LocalHttpServer(private val fileProvider: () -> File?, private val port: I
                         val read = fis.read(buffer)
                         if (read == -1) break
                         output.write(buffer, 0, read)
-                        output.flush()
                     }
                 }
             }
+            output.flush()
         } catch (e: SocketException) {
             // Client closed connection, normal for streaming media players
         } catch (e: Exception) {

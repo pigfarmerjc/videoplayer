@@ -50,11 +50,12 @@ fun PlayerGestureOverlay(
     onLongPressSpeed: (Boolean) -> Unit, // true for 2x, false for normal
     onSwipeDrag: (Float) -> Unit = {},
     onSwipeRelease: (Float) -> Unit = {},
-    onPullDownDrag: (Float) -> Unit = {},    // 下拉位移（px）
-    onPullDownRelease: (Float) -> Unit = {}, // 释放时传入最终位移
+    onPullDownDrag: (Float, Float) -> Unit = { _, _ -> },   // dx, dy 实际偏移量（px）
+    onPullDownRelease: (Float, Float) -> Unit = { _, _ -> }, // 释放时传入最终 dx, dy
     content: @Composable BoxScope.() -> Unit
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { findActivity(context) }
     val scope = rememberCoroutineScope()
 
     // Audio Manager for volume adjust
@@ -69,9 +70,8 @@ fun PlayerGestureOverlay(
     var showSpeedIndicator by remember { mutableStateOf(false) }
     var isLongPressActive by remember { mutableStateOf(false) }
 
-    // Virtual volume percent (0 - 200%) and drag accumulator
+    // Virtual volume percent (0 - 200%)
     var volumePercent by remember { mutableIntStateOf(100) }
-    var volumeAccumulator by remember { mutableFloatStateOf(0f) }
 
     // Sync system volume to virtual volumePercent initially
     LaunchedEffect(Unit) {
@@ -83,17 +83,21 @@ fun PlayerGestureOverlay(
     var showPullDownHint by remember { mutableStateOf(false) }
 
     // Hide gesture indicators after some time
-    var indicatorJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val indicatorJob = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
 
-    fun triggerIndicator(icon: ImageVector, text: String) {
-        indicatorIcon = icon
-        indicatorText = text
-        showIndicator = true
-        indicatorJob?.cancel()
-        indicatorJob = scope.launch {
+    fun hideIndicatorLater() {
+        indicatorJob[0]?.cancel()
+        indicatorJob[0] = scope.launch {
             delay(1000)
             showIndicator = false
         }
+    }
+
+    fun triggerIndicator(icon: ImageVector, text: String, autoHide: Boolean = true) {
+        indicatorIcon = icon
+        indicatorText = text
+        showIndicator = true
+        if (autoHide) hideIndicatorLater()
     }
 
     val currentIsLocked by rememberUpdatedState(isLocked)
@@ -111,6 +115,7 @@ fun PlayerGestureOverlay(
     val currentOnSwipeRelease by rememberUpdatedState(onSwipeRelease)
     val currentOnPullDownDrag by rememberUpdatedState(onPullDownDrag)
     val currentOnPullDownRelease by rememberUpdatedState(onPullDownRelease)
+
 
     Box(
         modifier = modifier
@@ -200,7 +205,6 @@ fun PlayerGestureOverlay(
                                 volumePercent = if (maxVolume > 0) (currentVol.toFloat() / maxVolume * 100).toInt() else 100
                             }
 
-                            val activity = findActivity(context)
                             val lp = activity?.window?.attributes
                             val currentBrightness = lp?.screenBrightness ?: -1f
                             gestureBrightness = if (currentBrightness < 0f) {
@@ -222,9 +226,10 @@ fun PlayerGestureOverlay(
                                 4 -> currentOnScrubFinished(scrubTarget)
                                 5 -> {
                                     showPullDownHint = false
-                                    currentOnPullDownRelease(totalDragY)
+                                    currentOnPullDownRelease(totalDragX, totalDragY)
                                 }
                             }
+                            if (dragType in 2..4) hideIndicatorLater()
                         }
                     },
                     onDragCancel = {
@@ -233,9 +238,10 @@ fun PlayerGestureOverlay(
                                 1 -> currentOnSwipeRelease(0f)
                                 5 -> {
                                     showPullDownHint = false
-                                    currentOnPullDownRelease(0f)
+                                    currentOnPullDownRelease(0f, 0f)
                                 }
                             }
+                            if (dragType in 2..4) hideIndicatorLater()
                         }
                     },
                     onDrag = { change, dragAmount ->
@@ -250,15 +256,16 @@ fun PlayerGestureOverlay(
                             if (dragType == 0) {
                                 val absDx = abs(totalDragX)
                                 val absDy = abs(totalDragY)
+                                val dist = Math.sqrt((totalDragX * totalDragX + totalDragY * totalDragY).toDouble()).toFloat()
 
-                                // ── 优先判断下拉关闭：左上角25%宽度，向下滑，且纵向位移 > 横向位移 ──
-                                if (startX < screenWidth * 0.25f
-                                    && totalDragY > 0f
-                                    && absDy > absDx
-                                    && absDy > vertThreshold
+                                // ── 优先判断滑动关闭：左上角 1/3 宽 × 1/3 高区域，任意方向划动超过阈值 ──
+                                if (startX < screenWidth * 0.33f
+                                    && startY < screenHeight * 0.33f
+                                    && dist > vertThreshold
                                 ) {
                                     dragType = 5
                                     showPullDownHint = true
+
                                 }
                                 // ── 水平切换视频（上半屏）或进度条拖拽（下半屏）──
                                 else if (absDx > absDy && absDx > horizThreshold) {
@@ -267,10 +274,14 @@ fun PlayerGestureOverlay(
                                     if (dragType == 4) {
                                         scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
                                         currentOnScrub(scrubTarget)
-                                        triggerIndicator(Icons.Default.SlowMotionVideo, formatGestureDuration(scrubTarget))
+                                        triggerIndicator(
+                                            Icons.Default.SlowMotionVideo,
+                                            formatGestureDuration(scrubTarget),
+                                            autoHide = false
+                                        )
                                     }
                                 }
-                                // ── 竖直滑动：左侧=亮度，右侧=音量，中间=忽略 ──
+                                // ── 竖直滑动：左侧=亮度（排除左上角关闭区域），右侧=音量，中间=忽略 ──
                                 else if (absDy > absDx && absDy > vertThreshold) {
                                     dragType = when {
                                         startX < screenWidth * 0.25f -> 2
@@ -287,7 +298,6 @@ fun PlayerGestureOverlay(
                                     // 亮度调节：直接累积，避免每帧读 window.attributes
                                     val delta = -dragAmount.y / screenHeight.toFloat()
                                     gestureBrightness = (gestureBrightness + delta).coerceIn(0.01f, 1f)
-                                    val activity = findActivity(context)
                                     activity?.let {
                                         val layoutParams = it.window.attributes
                                         layoutParams.screenBrightness = gestureBrightness
@@ -299,7 +309,8 @@ fun PlayerGestureOverlay(
                                                 pct < 70 -> Icons.Default.BrightnessMedium
                                                 else -> Icons.Default.BrightnessHigh
                                             },
-                                            text = "$pct%"
+                                            text = "$pct%",
+                                            autoHide = false
                                         )
                                     }
                                 }
@@ -348,7 +359,8 @@ fun PlayerGestureOverlay(
                                                 newVolPercent < 50 -> Icons.AutoMirrored.Filled.VolumeDown
                                                 else -> Icons.AutoMirrored.Filled.VolumeUp
                                             },
-                                            text = if (isBoosted) "音量倍增: $newVolPercent%" else "$newVolPercent%"
+                                            text = if (isBoosted) "音量倍增: $newVolPercent%" else "$newVolPercent%",
+                                            autoHide = false
                                         )
                                     }
                                 }
@@ -356,13 +368,15 @@ fun PlayerGestureOverlay(
                                 4 -> {
                                     scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
                                     currentOnScrub(scrubTarget)
-                                    triggerIndicator(Icons.Default.SlowMotionVideo, formatGestureDuration(scrubTarget))
+                                    triggerIndicator(
+                                        Icons.Default.SlowMotionVideo,
+                                        formatGestureDuration(scrubTarget),
+                                        autoHide = false
+                                    )
                                 }
 
                                 5 -> {
-                                    // 下拉关闭：只传递正向（向下）位移
-                                    val clamped = totalDragY.coerceAtLeast(0f)
-                                    currentOnPullDownDrag(clamped)
+                                    currentOnPullDownDrag(totalDragX, totalDragY)
                                 }
                             }
                         }
@@ -397,7 +411,7 @@ fun PlayerGestureOverlay(
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(Modifier.width(4.dp))
-                Text("下滑关闭", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                Text("滑动关闭", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             }
         }
 
