@@ -246,7 +246,6 @@ fun VideoPlayerScreen(
     var resumeAfterScrub by remember { mutableStateOf(false) }
     var useVlcFallback by remember { mutableStateOf(false) }
     var isScreenLocked by remember { mutableStateOf(false) }
-    var isWaitingForFirstFrame by remember { mutableStateOf(false) }
     var isExitingScreen by remember { mutableStateOf(false) }
     var abLoopStartMs by remember { mutableStateOf<Long?>(null) }
     var abLoopEndMs by remember { mutableStateOf<Long?>(null) }
@@ -317,6 +316,11 @@ fun VideoPlayerScreen(
         FloatingPlayerManager.playlist = playlist
         FloatingPlayerManager.currentIndex = currentIndex
         FloatingPlayerManager.useVlcFallback = useVlcFallback
+    }
+
+    LaunchedEffect(videoWidth, videoHeight) {
+        FloatingPlayerManager.videoWidth = videoWidth
+        FloatingPlayerManager.videoHeight = videoHeight
     }
 
     LaunchedEffect(Unit) {
@@ -399,25 +403,11 @@ fun VideoPlayerScreen(
             isScrubbing = false
             seekToPosition(positionMs, exact = seekProfile.allowExactFinalSeek, force = true)
             if (resumeAfterScrub) {
+                resumeAfterScrub = false
                 if (useVlcFallback) {
-                    vlcTogglePlayPause()
-                    resumeAfterScrub = false
+                    if (!isPlaying) vlcTogglePlayPause()
                 } else {
-                    val hasVideo = player?.currentTracks?.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_VIDEO) == true
-                    if (hasVideo) {
-                        isWaitingForFirstFrame = true
-                        scope.launch {
-                            delay(800)
-                            if (isWaitingForFirstFrame) {
-                                isWaitingForFirstFrame = false
-                                resumeAfterScrub = false
-                                player?.play()
-                            }
-                        }
-                    } else {
-                        resumeAfterScrub = false
-                        player?.play()
-                    }
+                    player?.play()
                 }
             }
         } else {
@@ -1029,11 +1019,6 @@ fun VideoPlayerScreen(
 
                     override fun onRenderedFirstFrame() {
                         playerReadyFlow.tryEmit(Unit)
-                        if (isWaitingForFirstFrame && latestSeekQueue?.isSeeking == false) {
-                            isWaitingForFirstFrame = false
-                            resumeAfterScrub = false
-                            player?.play()
-                        }
                     }
 
                     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
@@ -1269,27 +1254,8 @@ fun VideoPlayerScreen(
             },
             onDoubleTapSeek = { delta ->
                 val target = (currentPosition + delta).coerceIn(0L, duration.coerceAtLeast(0L))
-                val wasPlaying = isPlaying
                 currentPosition = target
-                if (wasPlaying && !useVlcFallback) {
-                    val hasVideo = player?.currentTracks?.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_VIDEO) == true
-                    if (hasVideo) {
-                        pauseCompat()
-                        isWaitingForFirstFrame = true
-                        seekToPosition(target, force = true)
-                        scope.launch {
-                            delay(800)
-                            if (isWaitingForFirstFrame) {
-                                isWaitingForFirstFrame = false
-                                player?.play()
-                            }
-                        }
-                    } else {
-                        seekToPosition(target, force = true)
-                    }
-                } else {
-                    seekToPosition(target, force = true)
-                }
+                seekToPosition(target, force = true)
             },
             onScrub = { targetPos ->
                 handleScrubSeek(targetPos, finished = false)
@@ -1697,7 +1663,7 @@ fun VideoPlayerScreen(
                 BottomControls(
                     currentPosition = currentPosition,
                     duration = duration,
-                    isPlaying = isPlaying,
+                    isPlaying = if (isScrubbing) resumeAfterScrub else isPlaying,
                     canPrev = currentIndex > 0 || autoPlayNext,
                     canNext = currentIndex < playlist.lastIndex || autoPlayNext,
                     playbackSpeed = playbackSpeed,
@@ -1746,6 +1712,8 @@ fun VideoPlayerScreen(
                                 FloatingPlayerManager.currentPosition = player?.currentPosition ?: currentPosition
                                 FloatingPlayerManager.useVlcFallback = useVlcFallback
                                 FloatingPlayerManager.isFloating = true
+                                FloatingPlayerManager.videoWidth = videoWidth
+                                FloatingPlayerManager.videoHeight = videoHeight
 
                                 val p = player
                                 player = null
@@ -2280,21 +2248,20 @@ private fun seekProfileFor(item: PlayerMediaItem, durationMs: Long): SeekProfile
     val is4k = isLikely4k(item)
     val isLargeFile = item.size > 1_500_000_000L
     val isHugeFile = item.size > 8_000_000_000L
-    val effectiveDuration = durationMs.coerceAtLeast(item.duration).coerceAtLeast(1L)
 
     return when {
         isHugeFile || (is4k && item.size > 4_000_000_000L) -> SeekProfile(
-            dragDecodeIntervalMs = 280L,
-            minPositionDeltaMs = maxOf(1_800L, effectiveDuration / 320L),
-            allowExactFinalSeek = false
+            dragDecodeIntervalMs = 16L,
+            minPositionDeltaMs = 0L,
+            allowExactFinalSeek = true
         )
         isLargeFile || is4k -> SeekProfile(
-            dragDecodeIntervalMs = 170L,
-            minPositionDeltaMs = maxOf(900L, effectiveDuration / 560L),
-            allowExactFinalSeek = false
+            dragDecodeIntervalMs = 16L,
+            minPositionDeltaMs = 0L,
+            allowExactFinalSeek = true
         )
         else -> SeekProfile(
-            dragDecodeIntervalMs = 80L,
+            dragDecodeIntervalMs = 16L,
             minPositionDeltaMs = 0L,
             allowExactFinalSeek = true
         )
