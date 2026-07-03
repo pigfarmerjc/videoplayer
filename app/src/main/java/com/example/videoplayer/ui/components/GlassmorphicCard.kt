@@ -1,4 +1,4 @@
-﻿package com.example.videoplayer.ui.components
+package com.example.videoplayer.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,6 +14,42 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.videoplayer.ui.theme.*
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.composed
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+
+fun Modifier.bounceClick(enabled: Boolean = true, onClick: () -> Unit) = composed {
+    if (!enabled) return@composed this
+    var isPressed by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.92f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
+        label = "bounceScale"
+    )
+
+    this
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+        }
+        .pointerInput(Unit) {
+            detectTapGestures(
+                onPress = {
+                    isPressed = true
+                    tryAwaitRelease()
+                    isPressed = false
+                },
+                onTap = { onClick() }
+            )
+        }
+}
 
 @Composable
 fun GlassmorphicCard(

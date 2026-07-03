@@ -1,4 +1,4 @@
-﻿package com.example.videoplayer.ui.screens
+package com.example.videoplayer.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -36,6 +36,7 @@ import com.example.videoplayer.data.model.MediaItem as PlayerMediaItem
 import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.data.repository.MediaRepository
 import com.example.videoplayer.ui.components.formatDuration
+import com.example.videoplayer.ui.components.bounceClick
 import com.example.videoplayer.ui.theme.*
 import kotlinx.coroutines.delay
 
@@ -199,13 +200,25 @@ fun AudioPlayerScreen(
                 CenterAlignedTopAppBar(
                     title = { Text("音频播放", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
                     navigationIcon = {
-                        IconButton(onClick = onBackClick) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 12.dp)
+                                .size(40.dp)
+                                .bounceClick { onBackClick() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White, modifier = Modifier.size(24.dp))
                         }
                     },
                     actions = {
-                        IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White)
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 12.dp)
+                                .size(40.dp)
+                                .bounceClick { showMenu = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White, modifier = Modifier.size(24.dp))
                         }
                         DropdownMenu(
                             expanded = showMenu,
@@ -344,18 +357,55 @@ fun AudioPlayerScreen(
                 }
             }
 
-            Row(Modifier.fillMaxWidth().padding(bottom = 30.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { playPrev() }, enabled = currentIndex > 0) {
-                    Icon(Icons.Default.SkipPrevious, contentDescription = "上一首", tint = if (currentIndex > 0) Color.White else Color.Gray)
-                }
-                IconButton(
-                    onClick = { player?.let { if (it.isPlaying) it.pause() else it.play() } },
-                    modifier = Modifier.size(68.dp).clip(RoundedCornerShape(34.dp)).background(PrimaryNeonPurple)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 30.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val canPrev = currentIndex > 0
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .bounceClick(enabled = canPrev) { playPrev() },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "播放", tint = Color.White, modifier = Modifier.size(36.dp))
+                    Icon(
+                        imageVector = Icons.Default.SkipPrevious,
+                        contentDescription = "上一首",
+                        tint = if (canPrev) Color.White else Color.Gray,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
-                IconButton(onClick = { playNext() }, enabled = currentIndex < playlist.lastIndex) {
-                    Icon(Icons.Default.SkipNext, contentDescription = "下一首", tint = if (currentIndex < playlist.lastIndex) Color.White else Color.Gray)
+
+                Box(
+                    modifier = Modifier
+                        .size(68.dp)
+                        .clip(CircleShape)
+                        .background(PrimaryNeonPurple)
+                        .bounceClick { player?.let { if (it.isPlaying) it.pause() else it.play() } },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "播放",
+                        tint = Color.White,
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+
+                val canNext = currentIndex < playlist.lastIndex
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .bounceClick(enabled = canNext) { playNext() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SkipNext,
+                        contentDescription = "下一首",
+                        tint = if (canNext) Color.White else Color.Gray,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
         }

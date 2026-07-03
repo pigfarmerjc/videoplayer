@@ -1,4 +1,4 @@
-﻿package com.example.videoplayer.ui.screens
+package com.example.videoplayer.ui.screens
 
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
@@ -36,6 +36,7 @@ import com.example.videoplayer.data.repository.MediaRepository
 import com.example.videoplayer.ui.components.mediaPreviewRequest
 import com.example.videoplayer.ui.theme.ObsidianBg
 import com.example.videoplayer.ui.theme.SecondaryNeonCyan
+import com.example.videoplayer.ui.components.bounceClick
 import androidx.compose.foundation.ExperimentalFoundationApi
 import kotlinx.coroutines.launch
 
@@ -127,8 +128,14 @@ fun PhotoViewerScreen(
                         }
                     },
                     navigationIcon = {
-                        IconButton(onClick = onBackClick) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 12.dp)
+                                .size(40.dp)
+                                .bounceClick { onBackClick() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White, modifier = Modifier.size(24.dp))
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = ObsidianBg.copy(alpha = 0.9f))
@@ -179,7 +186,7 @@ fun PhotoViewerScreen(
                             .size(44.dp)
                             .clip(RoundedCornerShape(22.dp))
                             .background(Color.Black.copy(alpha = 0.5f))
-                            .clickable { showPrevious() },
+                            .bounceClick { showPrevious() },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -200,7 +207,7 @@ fun PhotoViewerScreen(
                             .size(44.dp)
                             .clip(RoundedCornerShape(22.dp))
                             .background(Color.Black.copy(alpha = 0.5f))
-                            .clickable { showNext() },
+                            .bounceClick { showNext() },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(

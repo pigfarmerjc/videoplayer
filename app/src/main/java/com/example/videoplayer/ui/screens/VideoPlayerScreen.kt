@@ -123,6 +123,7 @@ import com.example.videoplayer.ui.components.PlayerGestureOverlay
 import com.example.videoplayer.ui.components.VideoThumbnailCache
 import com.example.videoplayer.ui.components.formatDuration
 import com.example.videoplayer.ui.components.formatFileSize
+import com.example.videoplayer.ui.components.bounceClick
 import com.example.videoplayer.ui.theme.*
 import com.example.videoplayer.util.SimpleGifEncoder
 import com.example.videoplayer.util.DlnaCastManager
@@ -2972,8 +2973,13 @@ private fun TopControls(
             .padding(start = 12.dp, end = 12.dp, top = 24.dp, bottom = 18.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onBackClick) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .bounceClick { onBackClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White, modifier = Modifier.size(24.dp))
         }
         Column(Modifier.weight(1f)) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -3021,11 +3027,17 @@ private fun TopControls(
                 fontWeight = FontWeight.Bold
             )
         }
-        IconButton(onClick = onFavoriteClick) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .bounceClick { onFavoriteClick() },
+            contentAlignment = Alignment.Center
+        ) {
             Icon(
                 if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                 contentDescription = "收藏",
-                tint = if (isFavorite) AccentPink else Color.White
+                tint = if (isFavorite) AccentPink else Color.White,
+                modifier = Modifier.size(24.dp)
             )
         }
     }
@@ -3131,28 +3143,52 @@ private fun BottomControls(
                 contentAlignment = Alignment.CenterStart
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onRotate) {
-                        Icon(Icons.Default.ScreenRotation, contentDescription = "旋转", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onRotate() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.ScreenRotation, contentDescription = "旋转", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = onCast) {
-                        Icon(Icons.Default.Cast, contentDescription = "投屏", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onCast() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Cast, contentDescription = "投屏", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = onPip) {
-                        Icon(Icons.Default.PictureInPicture, contentDescription = "小窗播放", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onPip() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.PictureInPicture, contentDescription = "小窗播放", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = onScreenshot) {
-                        Icon(Icons.Default.CameraAlt, contentDescription = "截图", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onScreenshot() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.CameraAlt, contentDescription = "截图", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    TextButton(onClick = onGif) {
+                    TextButton(
+                        onClick = onGif,
+                        modifier = Modifier.bounceClick { onGif() }
+                    ) {
                         Text("GIF", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
-                    TextButton(onClick = onSetCover) {
+                    TextButton(
+                        onClick = onSetCover,
+                        modifier = Modifier.bounceClick { onSetCover() }
+                    ) {
                         Text("封面", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
-                    IconButton(onClick = onInfo) {
-                        Icon(Icons.Default.Info, contentDescription = "视频信息", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onInfo() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Info, contentDescription = "视频信息", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    TextButton(onClick = onAbLoopClick) {
+                    TextButton(
+                        onClick = onAbLoopClick,
+                        modifier = Modifier.bounceClick { onAbLoopClick() }
+                    ) {
                         Text(
                             text = when {
                                 abLoopStartMs != null && abLoopEndMs != null -> "A-B"
@@ -3164,7 +3200,10 @@ private fun BottomControls(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    TextButton(onClick = { showSpeedPanel = !showSpeedPanel }) {
+                    TextButton(
+                        onClick = { showSpeedPanel = !showSpeedPanel },
+                        modifier = Modifier.bounceClick { showSpeedPanel = !showSpeedPanel }
+                    ) {
                         Text("${playbackSpeed}x", color = Color.White, fontSize = 12.sp)
                     }
                 }
@@ -3173,15 +3212,21 @@ private fun BottomControls(
                 contentAlignment = Alignment.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onPrev, enabled = canPrev) {
-                        Icon(Icons.Default.SkipPrevious, contentDescription = "上一个", tint = if (canPrev) Color.White else Color.Gray)
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .bounceClick(enabled = canPrev) { onPrev() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.SkipPrevious, contentDescription = "上一个", tint = if (canPrev) Color.White else Color.Gray, modifier = Modifier.size(28.dp))
                     }
-                    IconButton(
-                        onClick = onPlayPause,
+                    Box(
                         modifier = Modifier
                             .size(58.dp)
-                            .clip(RoundedCornerShape(29.dp))
+                            .clip(CircleShape)
                             .background(SecondaryNeonCyan)
+                            .bounceClick { onPlayPause() },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -3190,8 +3235,13 @@ private fun BottomControls(
                             modifier = Modifier.size(34.dp)
                         )
                     }
-                    IconButton(onClick = onNext, enabled = canNext) {
-                        Icon(Icons.Default.SkipNext, contentDescription = "下一个", tint = if (canNext) Color.White else Color.Gray)
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .bounceClick(enabled = canNext) { onNext() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.SkipNext, contentDescription = "下一个", tint = if (canNext) Color.White else Color.Gray, modifier = Modifier.size(28.dp))
                     }
                 }
             }
@@ -3199,8 +3249,13 @@ private fun BottomControls(
                 modifier = Modifier.weight(1f),
                 contentAlignment = Alignment.CenterEnd
             ) {
-                IconButton(onClick = onSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White)
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .bounceClick { onSettings() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White, modifier = Modifier.size(20.dp))
                 }
             }
         }

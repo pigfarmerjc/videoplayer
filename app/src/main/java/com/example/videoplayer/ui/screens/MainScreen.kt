@@ -67,6 +67,7 @@ import com.example.videoplayer.ui.components.AppBackground
 import com.example.videoplayer.ui.components.MediaGridTile
 import com.example.videoplayer.ui.components.MediaItemCard
 import com.example.videoplayer.ui.components.mediaPreviewRequest
+import com.example.videoplayer.ui.components.bounceClick
 import com.example.videoplayer.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -459,13 +460,14 @@ private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
             Text("4K 本地多媒体播放器", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
         }
         Row {
-            IconButton(
-                onClick = onRefresh,
+            Box(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.08f))
                     .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+                    .bounceClick { onRefresh() },
+                contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
@@ -475,13 +477,14 @@ private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
                 )
             }
             Spacer(Modifier.width(8.dp))
-            IconButton(
-                onClick = onSettings,
+            Box(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.08f))
                     .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+                    .bounceClick { onSettings() },
+                contentAlignment = Alignment.Center
             ) {
                 Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(20.dp))
             }
@@ -550,7 +553,7 @@ private fun SortToolbar(
                     .clip(RoundedCornerShape(10.dp))
                     .background(Color.White.copy(alpha = 0.05f))
                     .border(0.5.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(10.dp))
-                    .clickable { expanded = true }
+                    .bounceClick { expanded = true }
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -595,7 +598,7 @@ private fun SortToolbar(
                                     if (isActive) SecondaryNeonCyan else Color.White.copy(alpha = 0.3f),
                                     RoundedCornerShape(5.dp)
                                 )
-                                .clickable { onGridSizeChange(size) },
+                                .bounceClick { onGridSizeChange(size) },
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -609,12 +612,13 @@ private fun SortToolbar(
                     Spacer(Modifier.width(4.dp))
                 }
                 val isNotList = currentLayoutMode != LayoutMode.LIST
-                IconButton(
-                    onClick = onLayoutModeToggle,
+                Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isNotList) SecondaryNeonCyan.copy(alpha = 0.22f) else Color.Transparent)
+                        .bounceClick { onLayoutModeToggle() },
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = when (currentLayoutMode) {
@@ -899,7 +903,7 @@ fun NavBarItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: (
                 scaleX = 1f + 0.04f * selectionProgress
                 scaleY = 1f + 0.04f * selectionProgress
             }
-            .clickable { onClick() }
+            .bounceClick { onClick() }
             .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
         Icon(
