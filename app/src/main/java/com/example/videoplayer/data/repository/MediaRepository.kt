@@ -341,11 +341,11 @@ class MediaRepository(private val context: Context) {
     }
 
     fun getGalleryColumnCount(): Int {
-        return prefs.getInt("gallery_column_count", 4).coerceIn(2, 12)
+        return prefs.getInt("gallery_column_count", 4).coerceIn(2, 32)
     }
 
     fun setGalleryColumnCount(count: Int) {
-        prefs.edit().putInt("gallery_column_count", count.coerceIn(2, 12)).apply()
+        prefs.edit().putInt("gallery_column_count", count.coerceIn(2, 32)).apply()
     }
 
     fun isAudioGridModeEnabled(): Boolean = prefs.getBoolean("audio_grid_mode", false)

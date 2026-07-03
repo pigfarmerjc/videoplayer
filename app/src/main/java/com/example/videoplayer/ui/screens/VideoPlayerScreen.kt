@@ -28,6 +28,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -364,6 +365,7 @@ fun VideoPlayerScreen(
     val swipeOffsetAnim = remember { androidx.compose.animation.core.Animatable(0f) }
     var swipeDragOffset by remember { mutableFloatStateOf(0f) }
     var isSwipeDragging by remember { mutableStateOf(false) }
+    var resumeAfterSwipe by remember { mutableStateOf(false) }
     var swipeTargetIndex by remember { mutableStateOf<Int?>(null) }
     var isSwipeAnimating by remember { mutableStateOf(false) }
     var isWaitingForReady by remember { mutableStateOf(true) }
@@ -387,7 +389,13 @@ fun VideoPlayerScreen(
         if (useVlcFallback) {
             vlcSeekTo(positionMs)
         } else {
-            seekQueue?.seekTo(positionMs, exact, force)
+            player?.let { p ->
+                val targetParams = if (exact) SeekParameters.EXACT else SeekParameters.CLOSEST_SYNC
+                if (p.seekParameters != targetParams) {
+                    p.setSeekParameters(targetParams)
+                }
+                p.seekTo(positionMs)
+            }
         }
     }
 
@@ -480,14 +488,17 @@ fun VideoPlayerScreen(
                 targetIndex = 0
             }
         }
+        if (!isSwipeDragging) {
+            isSwipeDragging = true
+            resumeAfterSwipe = isPlaying
+            pauseCompat()
+        }
         if (targetIndex in playlist.indices) {
             swipeTargetIndex = targetIndex
-            isSwipeDragging = true
             swipeDragOffset = dragX
         } else {
             // Apply rubber-banding (drag resistance)
             swipeTargetIndex = null
-            isSwipeDragging = true
             swipeDragOffset = dragX * 0.25f
         }
     }
@@ -501,7 +512,7 @@ fun VideoPlayerScreen(
             swipeOffsetAnim.snapTo(swipeDragOffset)
             isSwipeDragging = false
             swipeDragOffset = 0f
-            val dragThreshold = screenWidthPx * 0.15f
+            val dragThreshold = screenWidthPx * 0.08f
             if (targetIndex != null && abs(totalDragX) > dragThreshold && targetIndex in playlist.indices) {
                 val direction = if (totalDragX < 0) 1 else -1
                 val targetOffset = -direction * screenWidthPx
@@ -513,7 +524,7 @@ fun VideoPlayerScreen(
                 )
 
                 markIfWatched()
-                pauseCompat()
+                // Already paused on drag start!
 
                 val targetVideo = playlist[targetIndex]
                 readyCoverVideo = targetVideo
@@ -535,6 +546,7 @@ fun VideoPlayerScreen(
                 delay(200L)
                 readyCoverVideo = null
                 isSwipeAnimating = false
+                resumeAfterSwipe = false
             } else {
                 // Cancel switch: spring back to 0
                 swipeOffsetAnim.animateTo(
@@ -543,6 +555,14 @@ fun VideoPlayerScreen(
                 )
                 swipeTargetIndex = null
                 isSwipeAnimating = false
+                if (resumeAfterSwipe) {
+                    resumeAfterSwipe = false
+                    if (useVlcFallback) {
+                        vlcTogglePlayPause()
+                    } else {
+                        player?.play()
+                    }
+                }
             }
         }
     }
@@ -625,7 +645,9 @@ fun VideoPlayerScreen(
         if (useVlcFallback) {
             vlcTogglePlayPause()
         } else {
-            player?.let { if (it.isPlaying) it.pause() else it.play() }
+            player?.let {
+                if (isPlaying) it.pause() else it.play()
+            }
         }
     }
 
@@ -956,8 +978,18 @@ fun VideoPlayerScreen(
                 }
 
                 val listener = object : Player.Listener {
-                    override fun onIsPlayingChanged(playing: Boolean) {
-                        isPlaying = playing
+                    override fun onEvents(player: Player, events: Player.Events) {
+                        if (events.containsAny(
+                                Player.EVENT_PLAY_WHEN_READY_CHANGED,
+                                Player.EVENT_PLAYBACK_STATE_CHANGED,
+                                Player.EVENT_IS_PLAYING_CHANGED
+                            )
+                        ) {
+                            val state = player.playbackState
+                            isPlaying = player.playWhenReady && 
+                                        state != Player.STATE_ENDED && 
+                                        state != Player.STATE_IDLE
+                        }
                     }
 
                     override fun onTracksChanged(currentTracks: Tracks) {
@@ -974,7 +1006,12 @@ fun VideoPlayerScreen(
                                     for (j in 0 until group.length) {
                                         val format = group.getTrackFormat(j)
                                         val mimeType = format.sampleMimeType
-                                        if (mimeType == androidx.media3.common.MimeTypes.AUDIO_RAW) {
+                                        val mimeLower = mimeType?.lowercase(Locale.ROOT) ?: ""
+                                        val codecLower = format.codecs?.lowercase(Locale.ROOT) ?: ""
+                                        val isPcmTrack = mimeLower.contains("pcm") || mimeLower.contains("raw") ||
+                                                codecLower.contains("pcm") || codecLower.contains("s24") ||
+                                                mimeType == androidx.media3.common.MimeTypes.AUDIO_RAW
+                                        if (isPcmTrack) {
                                             val encoding = format.pcmEncoding
                                             // ExoPlayer supports 8/16-bit PCM; use VLC for 24/32-bit or float PCM.
                                             if (encoding != androidx.media3.common.C.ENCODING_PCM_16BIT &&
@@ -1248,6 +1285,7 @@ fun VideoPlayerScreen(
             durationMs = duration,
             currentPositionMs = currentPosition,
             isLocked = isScreenLocked || isZoomed || isSphericalMode,
+            showControls = showControls && !isScreenLocked,
             isEnabled = !MainActivity.isInPipMode.value,
             onSingleTap = { showControls = !showControls },
             onCenterDoubleTap = { togglePlayPause() },
@@ -2238,6 +2276,8 @@ private fun shouldPreferVlcEngine(item: PlayerMediaItem): Boolean {
     val path = item.path.lowercase(Locale.ROOT)
     val source = if (path.isNotBlank()) path else name
     val ext = source.substringAfterLast('.', missingDelimiterValue = "")
+    val hasPcmS24le = source.contains("s24le") || source.contains("s24_le") || source.contains("pcm_s24")
+    if (hasPcmS24le) return true
     return ext in setOf(
         "avi", "wmv", "asf", "vob", "ts", "m2ts", "mts", "mpg", "mpeg", "flv", "iso"
     )
@@ -2276,17 +2316,17 @@ private fun seekProfileFor(item: PlayerMediaItem, durationMs: Long): SeekProfile
 
     return when {
         isHugeFile || (is4k && item.size > 4_000_000_000L) -> SeekProfile(
-            dragDecodeIntervalMs = 16L,
+            dragDecodeIntervalMs = 40L,
             minPositionDeltaMs = 0L,
             allowExactFinalSeek = true
         )
         isLargeFile || is4k -> SeekProfile(
-            dragDecodeIntervalMs = 16L,
+            dragDecodeIntervalMs = 30L,
             minPositionDeltaMs = 0L,
             allowExactFinalSeek = true
         )
         else -> SeekProfile(
-            dragDecodeIntervalMs = 16L,
+            dragDecodeIntervalMs = 20L,
             minPositionDeltaMs = 0L,
             allowExactFinalSeek = true
         )
@@ -2353,14 +2393,19 @@ private fun ExactVideoSeekBar(
     var dragTargetMs by remember { mutableLongStateOf(positionMs) }
     val shownPosition = dragTargetMs.takeIf { it >= 0L } ?: positionMs
 
+    val currentDurationMs by rememberUpdatedState(durationMs)
+    val currentWidthPx by rememberUpdatedState(widthPx)
+
     LaunchedEffect(positionMs) {
         dragTargetMs = positionMs
     }
 
     fun targetFromX(x: Float): Long {
-        if (durationMs <= 0L || widthPx <= 0) return 0L
-        val fraction = (x / widthPx.toFloat()).coerceIn(0f, 1f)
-        return (durationMs * fraction).toLong().coerceIn(0L, durationMs)
+        val dur = currentDurationMs
+        val w = currentWidthPx
+        if (dur <= 0L || w <= 0) return 0L
+        val fraction = (x / w.toFloat()).coerceIn(0f, 1f)
+        return (dur * fraction).toLong().coerceIn(0L, dur)
     }
 
     fun updateTarget(x: Float, finished: Boolean) {
@@ -2374,19 +2419,19 @@ private fun ExactVideoSeekBar(
         modifier = modifier
             .height(28.dp)
             .onGloballyPositioned { widthPx = it.size.width }
-            .pointerInput(durationMs, widthPx) {
+            .pointerInput(Unit) {
                 detectTapGestures { offset ->
                     updateTarget(offset.x, finished = true)
                 }
             }
-            .pointerInput(durationMs, widthPx) {
+            .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = { offset -> updateTarget(offset.x, finished = false) },
                     onDrag = { change, _ ->
                         change.consume()
                         updateTarget(change.position.x, finished = false)
                     },
-                    onDragEnd = { onSeekFinished(dragTargetMs.coerceIn(0L, durationMs.coerceAtLeast(0L))) },
+                    onDragEnd = { onSeekFinished(dragTargetMs.coerceIn(0L, currentDurationMs.coerceAtLeast(0L))) },
                     onDragCancel = { dragTargetMs = positionMs }
                 )
             }
@@ -4535,7 +4580,7 @@ fun VideoPlaylistPanel(
                     }
 
                     // Jump-to-current FAB — only visible when current item is off-screen
-                    AnimatedVisibility(
+                    androidx.compose.animation.AnimatedVisibility(
                         visible = showJumpButton,
                         enter = fadeIn() + slideInVertically { it / 2 },
                         exit = fadeOut() + slideOutVertically { it / 2 },

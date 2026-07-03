@@ -1,4 +1,4 @@
-﻿package com.example.videoplayer.ui.components
+package com.example.videoplayer.ui.components
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -473,34 +473,7 @@ fun MediaGalleryTile(
             LightweightMediaPreview(item = item, contentDescription = null)
         }
 
-        if (item.type == MediaType.VIDEO) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(4.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(horizontal = 4.dp, vertical = 1.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Icon(
-                        Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(8.dp)
-                    )
-                    Text(
-                        formatDuration(item.duration),
-                        color = Color.White,
-                        fontSize = 8.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
+
 
         if (progressFraction > 0f && progressFraction < 0.98f) {
             Box(
@@ -675,7 +648,7 @@ fun FolderGridTile(
 
     GlassmorphicCard(
         modifier = modifier
-            .aspectRatio(1f)
+            .aspectRatio(0.85f)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -691,50 +664,70 @@ fun FolderGridTile(
                     indication = androidx.compose.foundation.LocalIndication.current,
                     onClick = onClick
                 )
-                .padding(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
         ) {
             Box(
                 modifier = Modifier
-                    .size(64.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF13151D)),
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .background(Color(0xFF0F111A)),
                 contentAlignment = Alignment.Center
             ) {
                 val previewItem = remember(folder.items) {
                     folder.items.firstOrNull { it.type == MediaType.VIDEO || it.type == MediaType.PHOTO }
                 }
                 if (previewItem == null) {
-                    Icon(Icons.Default.Folder, contentDescription = null, tint = accent, modifier = Modifier.size(32.dp))
+                    Icon(
+                        Icons.Default.Folder, 
+                        contentDescription = null, 
+                        tint = accent.copy(alpha = 0.8f), 
+                        modifier = Modifier.size(48.dp)
+                    )
                 } else {
                     LightweightMediaPreview(item = previewItem, contentDescription = null)
                 }
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = folderDisplayName(folder.name),
-                color = TextPrimary,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
-            )
-            Box(
+            Column(
                 modifier = Modifier
-                    .padding(top = 6.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(accent.copy(alpha = 0.1f))
-                    .border(0.5.dp, accent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                    .fillMaxWidth()
+                    .background(Color(0x990D0E12))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalAlignment = Alignment.Start
             ) {
                 Text(
-                    text = "${folder.totalCount} 项",
-                    color = accent,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold
+                    text = folderDisplayName(folder.name),
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${folder.totalCount} 个媒体",
+                        color = TextSecondary,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(accent.copy(alpha = 0.12f))
+                            .border(0.5.dp, accent.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "FOLDER",
+                            color = accent,
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
             }
         }
     }

@@ -2,29 +2,36 @@ package com.example.videoplayer.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
-import com.example.videoplayer.ui.theme.*
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import com.example.videoplayer.ui.theme.*
 
+/**
+ * A click modifier that shows a subtle scale-down spring animation on press.
+ * Uses standard detectTapGestures (PointerEventPass.Main) so it does NOT
+ * consume events before siblings / parent composables, which would break
+ * NavBar tabs, Switches and any other interactive element in the same tree.
+ */
 fun Modifier.bounceClick(enabled: Boolean = true, onClick: () -> Unit) = composed {
     if (!enabled) return@composed this
     var isPressed by remember { mutableStateOf(false) }
@@ -33,23 +40,29 @@ fun Modifier.bounceClick(enabled: Boolean = true, onClick: () -> Unit) = compose
         animationSpec = spring(dampingRatio = 0.86f, stiffness = 720f),
         label = "bounceScale"
     )
+    val currentOnClick by rememberUpdatedState(onClick)
 
     this
         .graphicsLayer {
             scaleX = scale
             scaleY = scale
         }
-        .pointerInput(Unit) {
+        .pointerInput(enabled) {
             detectTapGestures(
                 onPress = {
                     isPressed = true
-                    tryAwaitRelease()
+                    try {
+                        awaitRelease()
+                    } catch (e: Exception) {
+                        // Ignore cancellation exceptions
+                    }
                     isPressed = false
                 },
-                onTap = { onClick() }
+                onTap = { currentOnClick() }
             )
         }
 }
+
 
 @Composable
 fun GlassmorphicCard(

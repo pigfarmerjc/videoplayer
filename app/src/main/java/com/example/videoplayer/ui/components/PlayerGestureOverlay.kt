@@ -40,6 +40,7 @@ fun PlayerGestureOverlay(
     durationMs: Long = 0L,
     currentPositionMs: Long = 0L,
     isLocked: Boolean = false,
+    showControls: Boolean = false,
     isEnabled: Boolean = true,
     onSingleTap: () -> Unit,
     onCenterDoubleTap: () -> Unit,
@@ -72,6 +73,7 @@ fun PlayerGestureOverlay(
 
     // Virtual volume percent (0 - 200%)
     var volumePercent by remember { mutableIntStateOf(100) }
+    var scrubTarget by remember { mutableLongStateOf(0L) }
 
     // Sync system volume to virtual volumePercent initially
     LaunchedEffect(Unit) {
@@ -118,275 +120,287 @@ fun PlayerGestureOverlay(
 
 
     Box(
-        modifier = modifier
-            .fillMaxSize()
-            // ── 1. 单击 / 双击 / 长按（锁屏时仍响应单击解锁）──
-            .pointerInput(isEnabled) {
-                if (!isEnabled) return@pointerInput
-                detectTapGestures(
-                    onTap = { currentOnSingleTap() },
-                    onDoubleTap = { offset ->
-                        if (!currentIsLocked) {
-                            val screenWidth = size.width
-                            val tapX = offset.x
-                            if (tapX < screenWidth * 0.25f) {
-                                currentOnDoubleTapSeek(-currentSeekSeconds * 1000L)
-                                triggerIndicator(Icons.Default.Replay10, "-${currentSeekSeconds}s")
-                            } else if (tapX > screenWidth * 0.75f) {
-                                currentOnDoubleTapSeek(currentSeekSeconds * 1000L)
-                                triggerIndicator(Icons.Default.Forward10, "+${currentSeekSeconds}s")
-                            } else {
-                                currentOnCenterDoubleTap()
-                            }
-                        }
-                    },
-                    onLongPress = {
-                        if (!currentIsLocked) {
-                            isLongPressActive = true
-                            showSpeedIndicator = true
-                            currentOnLongPressSpeed(true)
-                        }
-                    }
-                )
-            }
-            // ── 2. 长按抬手还原倍速 ──
-            .pointerInput(isEnabled) {
-                if (!isEnabled) return@pointerInput
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        if (isLongPressActive && event.changes.all { !it.pressed }) {
-                            isLongPressActive = false
-                            showSpeedIndicator = false
-                            currentOnLongPressSpeed(false)
-                        }
-                    }
-                }
-            }
-            // ── 3. 拖拽（进度条 / 亮度 / 音量 / 切集 / 下拉关闭）──
-            .pointerInput(isEnabled) {
-                if (!isEnabled) return@pointerInput
-                val density = context.resources.displayMetrics.density
-                // 优化：水平判定阈值从 24dp 降至 16dp，让切换更灵敏
-                val horizThreshold = 16f * density
-                // 竖直判定阈值保持 18dp
-                val vertThreshold = 18f * density
-                var totalDragX = 0f
-                var totalDragY = 0f
-                var startX = 0f
-                var startY = 0f
-                var scrubTarget = 0L
-                var volumeAccumulator = 0f
-                // dragType:
-                //   0 = 未确定
-                //   1 = 水平切换视频
-                //   2 = 亮度（左侧竖滑）
-                //   3 = 音量（右侧竖滑）
-                //   4 = 进度条拖拽（下半部水平）
-                //   5 = 下拉关闭（左上角区域下滑）
-                //  -1 = 中间竖滑，忽略
-                var dragType = 0
-                var gestureBrightness = -1f
-
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        if (!currentIsLocked) {
-                            totalDragX = 0f
-                            totalDragY = 0f
-                            startX = offset.x
-                            startY = offset.y
-                            scrubTarget = stableCurrentPositionMs
-                            volumeAccumulator = 0f
-                            dragType = 0
-                            showPullDownHint = false
-                            
-                            val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                            if (currentVol < maxVolume) {
-                                volumePercent = if (maxVolume > 0) (currentVol.toFloat() / maxVolume * 100).toInt() else 100
-                            }
-
-                            val lp = activity?.window?.attributes
-                            val currentBrightness = lp?.screenBrightness ?: -1f
-                            gestureBrightness = if (currentBrightness < 0f) {
-                                runCatching {
-                                    android.provider.Settings.System.getInt(
-                                        context.contentResolver,
-                                        android.provider.Settings.System.SCREEN_BRIGHTNESS
-                                    ) / 255f
-                                }.getOrDefault(0.5f)
-                            } else {
-                                currentBrightness
-                            }
-                        }
-                    },
-                    onDragEnd = {
-                        if (!currentIsLocked) {
-                            when (dragType) {
-                                1 -> currentOnSwipeRelease(totalDragX)
-                                4 -> currentOnScrubFinished(scrubTarget)
-                                5 -> {
-                                    showPullDownHint = false
-                                    currentOnPullDownRelease(totalDragX, totalDragY)
-                                }
-                            }
-                            if (dragType in 2..4) hideIndicatorLater()
-                        }
-                    },
-                    onDragCancel = {
-                        if (!currentIsLocked) {
-                            when (dragType) {
-                                1 -> currentOnSwipeRelease(0f)
-                                5 -> {
-                                    showPullDownHint = false
-                                    currentOnPullDownRelease(0f, 0f)
-                                }
-                            }
-                            if (dragType in 2..4) hideIndicatorLater()
-                        }
-                    },
-                    onDrag = { change, dragAmount ->
-                        if (!currentIsLocked) {
-                            change.consume()
-                            totalDragX += dragAmount.x
-                            totalDragY += dragAmount.y
-
-                            val screenWidth = size.width
-                            val screenHeight = size.height
-
-                            if (dragType == 0) {
-                                val absDx = abs(totalDragX)
-                                val absDy = abs(totalDragY)
-                                val dist = Math.sqrt((totalDragX * totalDragX + totalDragY * totalDragY).toDouble()).toFloat()
-
-                                // ── 优先判断滑动关闭：左上角 1/3 宽 × 1/3 高区域，任意方向划动超过阈值 ──
-                                if (startX < screenWidth * 0.33f
-                                    && startY < screenHeight * 0.33f
-                                    && dist > vertThreshold
-                                ) {
-                                    dragType = 5
-                                    showPullDownHint = true
-
-                                }
-                                // ── 水平切换视频（上半屏）或进度条拖拽（下半屏）──
-                                else if (absDx > absDy && absDx > horizThreshold) {
-                                    // 下半部(>35%)水平滑 = 进度条；否则 = 切换视频
-                                    dragType = if (startY > screenHeight * 0.35f && currentDurationMs > 0L) 4 else 1
-                                    if (dragType == 4) {
-                                        scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
-                                        currentOnScrub(scrubTarget)
-                                        triggerIndicator(
-                                            Icons.Default.SlowMotionVideo,
-                                            formatGestureDuration(scrubTarget),
-                                            autoHide = false
-                                        )
-                                    }
-                                }
-                                // ── 竖直滑动：左侧=亮度（排除左上角关闭区域），右侧=音量，中间=忽略 ──
-                                else if (absDy > absDx && absDy > vertThreshold) {
-                                    dragType = when {
-                                        startX < screenWidth * 0.25f -> 2
-                                        startX > screenWidth * 0.75f -> 3
-                                        else -> -1
-                                    }
-                                }
-                            }
-
-                            when (dragType) {
-                                1 -> currentOnSwipeDrag(totalDragX)
-
-                                2 -> {
-                                    // 亮度调节：直接累积，避免每帧读 window.attributes
-                                    val delta = -dragAmount.y / screenHeight.toFloat()
-                                    gestureBrightness = (gestureBrightness + delta).coerceIn(0.01f, 1f)
-                                    activity?.let {
-                                        val layoutParams = it.window.attributes
-                                        layoutParams.screenBrightness = gestureBrightness
-                                        it.window.attributes = layoutParams
-                                        val pct = (gestureBrightness * 100).toInt()
-                                        triggerIndicator(
-                                            icon = when {
-                                                pct < 30 -> Icons.Default.BrightnessLow
-                                                pct < 70 -> Icons.Default.BrightnessMedium
-                                                else -> Icons.Default.BrightnessHigh
-                                            },
-                                            text = "$pct%",
-                                            autoHide = false
-                                        )
-                                    }
-                                }
-
-                                3 -> {
-                                    // Calculate raw delta in percentage points (0 to 200)
-                                    val rawDeltaPercent = (-dragAmount.y / screenHeight.toFloat()) * 200f
-                                    
-                                    // Apply progressive damping above 50%
-                                    val factor = when {
-                                        volumePercent <= 50 -> 1.0f
-                                        volumePercent <= 100 -> {
-                                            1.0f - (volumePercent - 50) / 50f * 0.6f // linear down to 0.4
-                                        }
-                                        else -> {
-                                            0.4f - (volumePercent - 100) / 100f * 0.3f // linear down to 0.1
-                                        }
-                                    }
-                                    
-                                    val dampedDelta = rawDeltaPercent * factor
-                                    volumeAccumulator += dampedDelta
-                                    val actualDelta = volumeAccumulator.toInt()
-                                    
-                                    if (actualDelta != 0) {
-                                        volumeAccumulator -= actualDelta.toFloat()
-                                        val newVolPercent = (volumePercent + actualDelta).coerceIn(0, 200)
-                                        volumePercent = newVolPercent
-                                        
-                                        // Set hardware system volume (max out at 100%)
-                                        if (newVolPercent <= 100) {
-                                            val targetSysVol = (newVolPercent / 100f * maxVolume).toInt()
-                                            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetSysVol, 0)
-                                        } else {
-                                            if (maxVolume > 0) {
-                                                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxVolume, 0)
-                                            }
-                                        }
-                                        
-                                        // Call callback for software volume boost
-                                        currentOnVolumePercentChange(newVolPercent)
-                                        
-                                        val isBoosted = newVolPercent > 100
-                                        triggerIndicator(
-                                            icon = when {
-                                                newVolPercent == 0 -> Icons.AutoMirrored.Filled.VolumeMute
-                                                newVolPercent < 50 -> Icons.AutoMirrored.Filled.VolumeDown
-                                                else -> Icons.AutoMirrored.Filled.VolumeUp
-                                            },
-                                            text = if (isBoosted) "音量倍增: $newVolPercent%" else "$newVolPercent%",
-                                            autoHide = false
-                                        )
-                                    }
-                                }
-
-                                4 -> {
-                                    scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
-                                    currentOnScrub(scrubTarget)
-                                    triggerIndicator(
-                                        Icons.Default.SlowMotionVideo,
-                                        formatGestureDuration(scrubTarget),
-                                        autoHide = false
-                                    )
-                                }
-
-                                5 -> {
-                                    currentOnPullDownDrag(totalDragX, totalDragY)
-                                }
-                            }
-                        }
-                    }
-                )
-            }
+        modifier = modifier.fillMaxSize()
     ) {
-
         // App Content beneath gesture layers
         content()
+
+        if (isEnabled) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(
+                        top = if (showControls) 90.dp else 0.dp,
+                        bottom = if (showControls) 240.dp else 0.dp
+                    )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        // ── 1. 单击 / 双击 / 长按（锁屏时仍响应单击解锁）──
+                        .pointerInput(isEnabled) {
+                            if (!isEnabled) return@pointerInput
+                            detectTapGestures(
+                                onTap = { currentOnSingleTap() },
+                                onDoubleTap = { offset ->
+                                    if (!currentIsLocked) {
+                                        val screenWidth = size.width
+                                        val tapX = offset.x
+                                        if (tapX < screenWidth * 0.25f) {
+                                            currentOnDoubleTapSeek(-currentSeekSeconds * 1000L)
+                                            triggerIndicator(Icons.Default.Replay10, "-${currentSeekSeconds}s")
+                                        } else if (tapX > screenWidth * 0.75f) {
+                                            currentOnDoubleTapSeek(currentSeekSeconds * 1000L)
+                                            triggerIndicator(Icons.Default.Forward10, "+${currentSeekSeconds}s")
+                                        } else {
+                                            currentOnCenterDoubleTap()
+                                        }
+                                    }
+                                },
+                                onLongPress = {
+                                    if (!currentIsLocked) {
+                                        isLongPressActive = true
+                                        showSpeedIndicator = true
+                                        currentOnLongPressSpeed(true)
+                                    }
+                                }
+                            )
+                        }
+                        // ── 2. 长按抬手还原倍速 ──
+                        .pointerInput(isEnabled) {
+                            if (!isEnabled) return@pointerInput
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    if (isLongPressActive && event.changes.all { !it.pressed }) {
+                                        isLongPressActive = false
+                                        showSpeedIndicator = false
+                                        currentOnLongPressSpeed(false)
+                                    }
+                                }
+                            }
+                        }
+                        // ── 3. 拖拽（进度条 / 亮度 / 音量 / 切集 / 下拉关闭）──
+                        .pointerInput(isEnabled) {
+                            if (!isEnabled) return@pointerInput
+                            val density = context.resources.displayMetrics.density
+                            // 优化：水平判定阈值从 24dp 降至 16dp，让切换更灵敏
+                            val horizThreshold = 10f * density
+                            // 竖直判定阈值保持 18dp
+                            val vertThreshold = 18f * density
+                        var totalDragX = 0f
+                        var totalDragY = 0f
+                        var startX = 0f
+                        var startY = 0f
+                        var volumeAccumulator = 0f
+                        // dragType:
+                        //   0 = 未确定
+                        //   1 = 水平切换视频
+                        //   2 = 亮度（左侧竖滑）
+                        //   3 = 音量（右侧竖滑）
+                        //   4 = 进度条拖拽（下半部水平）
+                        //   5 = 下拉关闭（左上角区域下滑）
+                        //  -1 = 中间竖滑，忽略
+                        var dragType = 0
+                        var gestureBrightness = -1f
+
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                if (!currentIsLocked) {
+                                    totalDragX = 0f
+                                    totalDragY = 0f
+                                    startX = offset.x
+                                    startY = offset.y
+                                    scrubTarget = stableCurrentPositionMs
+                                    volumeAccumulator = 0f
+                                    dragType = 0
+                                    showPullDownHint = false
+                                    
+                                    val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                    if (currentVol < maxVolume) {
+                                        volumePercent = if (maxVolume > 0) (currentVol.toFloat() / maxVolume * 100).toInt() else 100
+                                    }
+
+                                    val lp = activity?.window?.attributes
+                                    val currentBrightness = lp?.screenBrightness ?: -1f
+                                    gestureBrightness = if (currentBrightness < 0f) {
+                                        runCatching {
+                                            android.provider.Settings.System.getInt(
+                                                context.contentResolver,
+                                                android.provider.Settings.System.SCREEN_BRIGHTNESS
+                                            ) / 255f
+                                        }.getOrDefault(0.5f)
+                                    } else {
+                                        currentBrightness
+                                    }
+                                }
+                            },
+                            onDragEnd = {
+                                if (!currentIsLocked) {
+                                    when (dragType) {
+                                        1 -> currentOnSwipeRelease(totalDragX)
+                                        4 -> currentOnScrubFinished(scrubTarget)
+                                        5 -> {
+                                            showPullDownHint = false
+                                            currentOnPullDownRelease(totalDragX, totalDragY)
+                                        }
+                                    }
+                                    if (dragType in 2..4) hideIndicatorLater()
+                                }
+                            },
+                            onDragCancel = {
+                                if (!currentIsLocked) {
+                                    when (dragType) {
+                                        1 -> currentOnSwipeRelease(0f)
+                                        5 -> {
+                                            showPullDownHint = false
+                                            currentOnPullDownRelease(0f, 0f)
+                                        }
+                                    }
+                                    if (dragType in 2..4) hideIndicatorLater()
+                                }
+                            },
+                            onDrag = { change, dragAmount ->
+                                if (!currentIsLocked) {
+                                    change.consume()
+                                    totalDragX += dragAmount.x
+                                    totalDragY += dragAmount.y
+
+                                    val screenWidth = size.width
+                                    val screenHeight = size.height
+
+                                    if (dragType == 0) {
+                                        val absDx = abs(totalDragX)
+                                        val absDy = abs(totalDragY)
+                                        val dist = Math.sqrt((totalDragX * totalDragX + totalDragY * totalDragY).toDouble()).toFloat()
+
+                                        // ── 优先判断滑动关闭：左上角 1/3 宽 × 1/3 高区域，任意方向划动超过阈值 ──
+                                        if (startX < screenWidth * 0.33f
+                                            && startY < screenHeight * 0.33f
+                                            && dist > vertThreshold
+                                        ) {
+                                            dragType = 5
+                                            showPullDownHint = true
+
+                                        }
+                                        // ── 水平切换视频（上半屏）或进度条拖拽（下半屏）──
+                                        else if (absDx > absDy && absDx > horizThreshold) {
+                                            // 上半部(<=35%)水平滑 = 进度条；否则 = 切换视频
+                                            dragType = if (startY <= screenHeight * 0.35f && currentDurationMs > 0L) 4 else 1
+                                            if (dragType == 4) {
+                                                scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
+                                                currentOnScrub(scrubTarget)
+                                                triggerIndicator(
+                                                    Icons.Default.SlowMotionVideo,
+                                                    formatGestureDuration(scrubTarget),
+                                                    autoHide = false
+                                                )
+                                            }
+                                        }
+                                        // ── 竖直滑动：左侧=亮度（排除左上角关闭区域），右侧=音量，中间=忽略 ──
+                                        else if (absDy > absDx && absDy > vertThreshold) {
+                                            dragType = when {
+                                                startX < screenWidth * 0.25f -> 2
+                                                startX > screenWidth * 0.75f -> 3
+                                                else -> -1
+                                            }
+                                        }
+                                    }
+
+                                    when (dragType) {
+                                        1 -> currentOnSwipeDrag(totalDragX)
+
+                                        2 -> {
+                                            // 亮度调节：直接累积，避免每帧读 window.attributes
+                                            val delta = -dragAmount.y / screenHeight.toFloat()
+                                            gestureBrightness = (gestureBrightness + delta).coerceIn(0.01f, 1f)
+                                            activity?.let {
+                                                val layoutParams = it.window.attributes
+                                                layoutParams.screenBrightness = gestureBrightness
+                                                it.window.attributes = layoutParams
+                                                val pct = (gestureBrightness * 100).toInt()
+                                                triggerIndicator(
+                                                    icon = when {
+                                                        pct < 30 -> Icons.Default.BrightnessLow
+                                                        pct < 70 -> Icons.Default.BrightnessMedium
+                                                        else -> Icons.Default.BrightnessHigh
+                                                    },
+                                                    text = "$pct%",
+                                                    autoHide = false
+                                                )
+                                            }
+                                        }
+
+                                        3 -> {
+                                            // Calculate raw delta in percentage points (0 to 200)
+                                            val rawDeltaPercent = (-dragAmount.y / screenHeight.toFloat()) * 200f
+                                            
+                                            // Apply progressive damping above 50%
+                                            val factor = when {
+                                                volumePercent <= 50 -> 1.0f
+                                                volumePercent <= 100 -> {
+                                                    1.0f - (volumePercent - 50) / 50f * 0.6f // linear down to 0.4
+                                                }
+                                                else -> {
+                                                    0.4f - (volumePercent - 100) / 100f * 0.3f // linear down to 0.1
+                                                }
+                                            }
+                                            
+                                            val dampedDelta = rawDeltaPercent * factor
+                                            volumeAccumulator += dampedDelta
+                                            val actualDelta = volumeAccumulator.toInt()
+                                            
+                                            if (actualDelta != 0) {
+                                                volumeAccumulator -= actualDelta.toFloat()
+                                                val newVolPercent = (volumePercent + actualDelta).coerceIn(0, 200)
+                                                volumePercent = newVolPercent
+                                                
+                                                // Set hardware system volume (max out at 100%)
+                                                if (newVolPercent <= 100) {
+                                                    val targetSysVol = (newVolPercent / 100f * maxVolume).toInt()
+                                                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, targetSysVol, 0)
+                                                } else {
+                                                    if (maxVolume > 0) {
+                                                        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxVolume, 0)
+                                                    }
+                                                }
+                                                
+                                                // Call callback for software volume boost
+                                                currentOnVolumePercentChange(newVolPercent)
+                                                
+                                                val isBoosted = newVolPercent > 100
+                                                triggerIndicator(
+                                                    icon = when {
+                                                        newVolPercent == 0 -> Icons.AutoMirrored.Filled.VolumeMute
+                                                        newVolPercent < 50 -> Icons.AutoMirrored.Filled.VolumeDown
+                                                        else -> Icons.AutoMirrored.Filled.VolumeUp
+                                                    },
+                                                    text = if (isBoosted) "音量倍增: $newVolPercent%" else "$newVolPercent%",
+                                                    autoHide = false
+                                                )
+                                            }
+                                        }
+
+                                        4 -> {
+                                            scrubTarget = ((change.position.x / screenWidth.toFloat()).coerceIn(0f, 1f) * currentDurationMs).toLong()
+                                            currentOnScrub(scrubTarget)
+                                            triggerIndicator(
+                                                Icons.Default.SlowMotionVideo,
+                                                formatGestureDuration(scrubTarget),
+                                                autoHide = false
+                                            )
+                                        }
+
+                                        5 -> {
+                                            currentOnPullDownDrag(totalDragX, totalDragY)
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+            )
+        }
 
         // 下拉关闭提示箭头
         AnimatedVisibility(
@@ -422,10 +436,24 @@ fun PlayerGestureOverlay(
             exit = fadeOut() + scaleOut(),
             modifier = Modifier.align(Alignment.Center)
         ) {
+            val isVolume = indicatorText.contains("音量") || indicatorText.contains("Volume") || indicatorText.contains("倍增")
+            val isBrightness = indicatorText.contains("亮度") || indicatorText.contains("Brightness") || indicatorText.contains("%") && !isVolume
+            val isSeek = indicatorText.contains(":") || indicatorText.contains("s")
+
             val pctDigits = indicatorText.filter { it.isDigit() }.toIntOrNull()
-            val pct = pctDigits
-            val isVolumeBoosted = pct != null && pct > 100 && (indicatorText.contains("倍增") || indicatorText.contains("Boost"))
+            val pct = if (isVolume || isBrightness) pctDigits else null
+            val isVolumeBoosted = isVolume && pct != null && pct > 100
             val tintColor = if (isVolumeBoosted) Color(0xFFFF5722) else SecondaryNeonCyan
+
+            val progressVal = when {
+                isVolume -> (pct ?: 0) / 200f
+                isBrightness -> (pct ?: 0) / 100f
+                isSeek && currentDurationMs > 0L -> {
+                    val pos = if (indicatorIcon == Icons.Default.SlowMotionVideo) scrubTarget else currentPositionMs
+                    pos.toFloat() / currentDurationMs.toFloat()
+                }
+                else -> null
+            }
 
             Column(
                 modifier = Modifier
@@ -449,12 +477,7 @@ fun PlayerGestureOverlay(
                     fontWeight = FontWeight.Bold
                 )
 
-                if (pct != null) {
-                    val progressVal = if (isVolumeBoosted || indicatorText.contains("音量") && pct <= 100) {
-                        pct / 200f // Show out of 200% for volume
-                    } else {
-                        pct / 100f // Show out of 100% for brightness
-                    }
+                if (progressVal != null) {
                     Spacer(modifier = Modifier.height(8.dp))
                     LinearProgressIndicator(
                         progress = { progressVal.coerceIn(0f, 1f) },
@@ -499,6 +522,7 @@ fun PlayerGestureOverlay(
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold
                 )
+                }
             }
         }
     }

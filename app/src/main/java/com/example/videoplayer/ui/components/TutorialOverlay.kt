@@ -109,26 +109,26 @@ fun PlayerTutorialOverlay(
                     alignEnd = true
                 )
 
-                // 上半部分 — 左右切换视频
+                // 上半部分 — 拖拽进度
                 TutorialBadge(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 130.dp),
-                    icon = Icons.Default.SwapHoriz,
+                    icon = Icons.Default.SlowMotionVideo,
                     title = "上半部 左右滑",
-                    desc = "切换上下一个视频",
-                    color = PrimaryNeonPurple
+                    desc = "拖拽跳转视频进度",
+                    color = Color(0xFF10B981)
                 )
 
-                // 下半部分 — 拖拽进度
+                // 下半部分 — 左右切换视频
                 TutorialBadge(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 130.dp),
-                    icon = Icons.Default.SlowMotionVideo,
+                    icon = Icons.Default.SwapHoriz,
                     title = "下半部 左右滑",
-                    desc = "拖拽跳转视频进度",
-                    color = Color(0xFF10B981)
+                    desc = "切换上下一个视频",
+                    color = PrimaryNeonPurple
                 )
 
                 // 左侧快退

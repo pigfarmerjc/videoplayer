@@ -83,6 +83,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -441,7 +442,7 @@ private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 22.dp, bottom = 12.dp),
+            .padding(top = 10.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -453,16 +454,16 @@ private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
                 text = "黑猫播放器",
                 style = TextStyle(
                     brush = titleGradient,
-                    fontSize = 24.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Bold
                 )
             )
-            Text("4K 本地多媒体播放器", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text("4K 本地多媒体播放器", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Medium)
         }
         Row {
             Box(
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(34.dp)
                     .clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.08f))
                     .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
@@ -473,20 +474,20 @@ private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
                     imageVector = Icons.Default.Refresh,
                     contentDescription = "Refresh",
                     tint = SecondaryNeonCyan,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(16.dp)
                 )
             }
             Spacer(Modifier.width(8.dp))
             Box(
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(34.dp)
                     .clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.08f))
                     .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
                     .bounceClick { onSettings() },
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(20.dp))
+                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -497,30 +498,53 @@ private fun SearchBox(query: String, onQueryChange: (String) -> Unit) {
     GlassmorphicCard(
         modifier = Modifier
             .fillMaxWidth()
-            .height(50.dp),
-        cornerRadius = 14.dp,
+            .height(38.dp),
+        cornerRadius = 10.dp,
         shadowElevation = 1.dp
     ) {
-        Row(Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.Search, contentDescription = null, tint = SecondaryNeonCyan, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(10.dp))
-            TextField(
-                value = query,
-                onValueChange = onQueryChange,
-                placeholder = { Text("搜索视频、音频、图片...", color = TextMuted, fontSize = 14.sp) },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                )
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Search,
+                contentDescription = null,
+                tint = SecondaryNeonCyan,
+                modifier = Modifier.size(16.dp)
             )
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier.weight(1f),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                if (query.isEmpty()) {
+                    Text(
+                        "搜索视频、音频、图片...",
+                        color = TextMuted,
+                        fontSize = 13.sp
+                    )
+                }
+                androidx.compose.foundation.text.BasicTextField(
+                    value = query,
+                    onValueChange = onQueryChange,
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        color = Color.White,
+                        fontSize = 13.sp
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(SecondaryNeonCyan)
+                )
+            }
             if (query.isNotEmpty()) {
-                Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color.White, modifier = Modifier.size(18.dp).clickable { onQueryChange("") })
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Clear",
+                    tint = TextMuted,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onQueryChange("") }
+                )
             }
         }
     }
@@ -861,6 +885,7 @@ fun GlassmorphicBottomNavBar(
                     colors = listOf(
                         CarbonBorder,
                         Color(0x1F06B6D4),
+                        Color(0x1F8B5CF6),
                         CarbonBorder.copy(alpha = 0.5f)
                     )
                 ),
@@ -888,20 +913,40 @@ fun GlassmorphicBottomNavBar(
 fun NavBarItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: () -> Unit) {
     val selectionProgress by androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (isSelected) 1f else 0f,
-        animationSpec = tween(durationMillis = 220),
+        animationSpec = spring(dampingRatio = 0.82f, stiffness = 400f),
         label = "navSelection"
     )
-    val tintColor = androidx.compose.ui.graphics.lerp(TextMuted, SecondaryNeonCyan, selectionProgress)
+    val progressClamped = selectionProgress.coerceIn(0f, 1f)
+    val tintColor = androidx.compose.ui.graphics.lerp(TextMuted, SecondaryNeonCyan, progressClamped)
     
+    val activeBorderBrush = Brush.linearGradient(
+        colors = listOf(
+            SecondaryNeonCyan.copy(alpha = 0.35f * progressClamped),
+            PrimaryNeonPurple.copy(alpha = 0.18f * progressClamped)
+        )
+    )
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
-            .background(SecondaryNeonCyan.copy(alpha = 0.16f * selectionProgress))
+            .background(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        SecondaryNeonCyan.copy(alpha = 0.12f * progressClamped),
+                        PrimaryNeonPurple.copy(alpha = 0.04f * progressClamped)
+                    )
+                )
+            )
+            .border(
+                width = 0.5.dp,
+                brush = activeBorderBrush,
+                shape = RoundedCornerShape(12.dp)
+            )
             .graphicsLayer {
-                scaleX = 1f + 0.04f * selectionProgress
-                scaleY = 1f + 0.04f * selectionProgress
+                scaleX = 1f + 0.05f * progressClamped
+                scaleY = 1f + 0.05f * progressClamped
             }
             .bounceClick { onClick() }
             .padding(horizontal = 12.dp, vertical = 6.dp)
@@ -1151,7 +1196,7 @@ fun Modifier.pinchToZoomColumns(
                                 }
                                 event.changes.forEach { it.consume() }
                             } else if (scaleMultiplier < 0.7f) {
-                                if (cols < 12) {
+                                if (cols < 32) {
                                     currentOnChange(cols + 1)
                                     scaleMultiplier = 1.0f
                                 } else {
