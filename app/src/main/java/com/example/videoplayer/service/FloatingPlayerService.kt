@@ -624,8 +624,10 @@ class FloatingPlayerService : Service() {
     }
 
     private fun initializeExoPlayer(item: MediaItem) {
+        // Enable decoder fallback so hardware decoder failures automatically retry with
+        // software decoders — improves playback robustness for high-profile 4K / exotic formats.
         val renderersFactory = DefaultRenderersFactory(applicationContext)
-            .setEnableDecoderFallback(false)
+            .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
 
         val is4k = item.resolution.lowercase(Locale.ROOT).contains("x") && item.resolution.split("x").mapNotNull { it.trim().toIntOrNull() }.let { parts -> parts.size >= 2 && (parts[0] >= 3500 || parts[1] >= 2000) }

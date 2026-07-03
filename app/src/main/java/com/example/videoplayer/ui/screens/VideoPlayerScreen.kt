@@ -4037,7 +4037,7 @@ private fun CastDeviceSelectionDialog(
                         modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(devices) { device ->
+                        items(devices, key = { it.location }) { device ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()

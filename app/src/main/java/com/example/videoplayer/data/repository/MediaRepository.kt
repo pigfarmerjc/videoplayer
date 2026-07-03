@@ -316,8 +316,11 @@ class MediaRepository(private val context: Context) {
     }
 
     fun setVideoLayoutMode(mode: LayoutMode) {
-        prefs.edit().putInt("video_layout_mode_v2", mode.ordinal).apply()
-        prefs.edit().putBoolean("video_grid_mode", mode == LayoutMode.GRID).apply()
+        // Single atomic write: merge both keys into one prefs transaction.
+        prefs.edit()
+            .putInt("video_layout_mode_v2", mode.ordinal)
+            .putBoolean("video_grid_mode", mode == LayoutMode.GRID)
+            .apply()
     }
 
     fun getFolderLayoutMode(): LayoutMode {
@@ -330,8 +333,11 @@ class MediaRepository(private val context: Context) {
     }
 
     fun setFolderLayoutMode(mode: LayoutMode) {
-        prefs.edit().putInt("folder_layout_mode_v2", mode.ordinal).apply()
-        prefs.edit().putBoolean("folder_grid_mode", mode == LayoutMode.GRID).apply()
+        // Single atomic write: merge both keys into one prefs transaction.
+        prefs.edit()
+            .putInt("folder_layout_mode_v2", mode.ordinal)
+            .putBoolean("folder_grid_mode", mode == LayoutMode.GRID)
+            .apply()
     }
 
     fun getGalleryColumnCount(): Int {
