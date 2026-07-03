@@ -63,6 +63,10 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.VideoFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.border
 import androidx.activity.compose.BackHandler
@@ -131,6 +135,11 @@ import com.example.videoplayer.util.DlnaDevice
 import com.example.videoplayer.util.AudioEffectManager
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import kotlinx.coroutines.sync.withPermit
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
@@ -222,6 +231,7 @@ fun VideoPlayerScreen(
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
     var showSettings by remember { mutableStateOf(false) }
+    var showPlaylist by remember { mutableStateOf(false) }
     var virtualVolumePercent by remember { mutableIntStateOf(100) }
     var currentEqPreset by remember { mutableStateOf("Normal") }
     var showInfo by remember { mutableStateOf(false) }
@@ -1753,6 +1763,7 @@ fun VideoPlayerScreen(
                     onSetCover = { selectCustomCover() },
                     onInfo = { showInfo = true },
                     onSettings = { showSettings = true },
+                    onPlaylist = { showPlaylist = true },
                     abLoopStartMs = abLoopStartMs,
                     abLoopEndMs = abLoopEndMs,
                     onAbLoopClick = { handleAbLoopClick() }
@@ -2036,6 +2047,19 @@ fun VideoPlayerScreen(
                 showTutorial = true
             },
             onDismiss = { showSettings = false }
+        )
+    }
+
+    // Playlist panel — fullscreen overlay that slides in from the right.
+    if (showPlaylist) {
+        VideoPlaylistPanel(
+            playlist = playlist,
+            currentIndex = currentIndex,
+            onItemClick = { idx ->
+                switchToIndex(idx, if (idx > currentIndex) 1 else -1)
+                showPlaylist = false
+            },
+            onDismiss = { showPlaylist = false }
         )
     }
 
@@ -3066,6 +3090,7 @@ private fun BottomControls(
     onSetCover: () -> Unit,
     onInfo: () -> Unit,
     onSettings: () -> Unit,
+    onPlaylist: () -> Unit,
     abLoopStartMs: Long?,
     abLoopEndMs: Long?,
     onAbLoopClick: () -> Unit
@@ -3249,13 +3274,23 @@ private fun BottomControls(
                 modifier = Modifier.weight(1f),
                 contentAlignment = Alignment.CenterEnd
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .bounceClick { onSettings() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White, modifier = Modifier.size(20.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .bounceClick { onPlaylist() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.QueueMusic, contentDescription = "播放列表", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .bounceClick { onSettings() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
                 }
             }
         }
@@ -4332,6 +4367,356 @@ private fun CastRemoteControlOverlay(
                     fontSize = 9.sp,
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 )
+            }
+        }
+    }
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// VideoPlaylistPanel
+//
+// Performance decisions for massive libraries (android-logic-best-practices skill):
+//   • key = storageKey  →  item identity stable across index shifts; Compose skips
+//                          recomposition for off-screen items on any list change.
+//   • contentType        →  slot-table reuse: all rows share the same composable shape.
+//   • Semaphore(4)       →  caps concurrent thumbnail IO so memory stays flat even when
+//                          the user flings through thousands of rows in one gesture.
+//   • derivedStateOf     →  jump-FAB visibility reads scroll state without triggering a
+//                          full panel recomposition on every frame.
+//   • VideoThumbnailCache (LRU) → subsequent renders read Bitmap from memory, zero disk IO.
+// ————————————————————————————————————————————————————————————————————————————
+@Composable
+fun VideoPlaylistPanel(
+    playlist: List<PlayerMediaItem>,
+    currentIndex: Int,
+    onItemClick: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+
+    // Auto-scroll to current item when panel first opens.
+    LaunchedEffect(Unit) {
+        if (currentIndex in playlist.indices) {
+            listState.scrollToItem((currentIndex - 2).coerceAtLeast(0))
+        }
+    }
+
+    // derivedStateOf: recompute only when scroll state changes, not on every frame.
+    val showJumpButton by remember {
+        derivedStateOf {
+            val first = listState.firstVisibleItemIndex
+            val visibleCount = listState.layoutInfo.visibleItemsInfo.size
+            currentIndex !in first..(first + visibleCount)
+        }
+    }
+
+    // Semaphore: at most 4 concurrent thumbnail decodes to keep heap pressure flat.
+    val thumbSemaphore = remember { kotlinx.coroutines.sync.Semaphore(4) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(0.70f)
+                .align(Alignment.CenterEnd)
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {}
+                .background(
+                    brush = Brush.horizontalGradient(
+                        listOf(
+                            Color(0xFF080810).copy(alpha = 0.0f),
+                            Color(0xFF0C0C1A)
+                        )
+                    )
+                )
+                .border(
+                    width = 0.5.dp,
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            SecondaryNeonCyan.copy(alpha = 0.30f),
+                            PrimaryNeonPurple.copy(alpha = 0.18f)
+                        )
+                    ),
+                    shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp)
+                )
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+
+                // Header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0C0C1A))
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.QueueMusic,
+                        contentDescription = null,
+                        tint = SecondaryNeonCyan,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "播放列表",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = "${playlist.size} 个",
+                        color = TextMuted,
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .bounceClick { onDismiss() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "关闭列表",
+                            tint = Color.White.copy(alpha = 0.65f),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+
+                // Thin gradient divider
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(SecondaryNeonCyan.copy(alpha = 0.4f), PrimaryNeonPurple.copy(alpha = 0.2f), Color.Transparent)
+                            )
+                        )
+                )
+
+                // List
+                Box(modifier = Modifier.weight(1f)) {
+                    LazyColumn(
+                        state = listState,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        itemsIndexed(
+                            items = playlist,
+                            key = { _, item -> item.storageKey },
+                            contentType = { _, _ -> "playlist_row" }
+                        ) { idx, item ->
+                            PlaylistItemRow(
+                                item = item,
+                                index = idx,
+                                isCurrent = idx == currentIndex,
+                                thumbSemaphore = thumbSemaphore,
+                                onClick = { onItemClick(idx) }
+                            )
+                        }
+                    }
+
+                    // Jump-to-current FAB — only visible when current item is off-screen
+                    AnimatedVisibility(
+                        visible = showJumpButton,
+                        enter = fadeIn() + slideInVertically { it / 2 },
+                        exit = fadeOut() + slideOutVertically { it / 2 },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 14.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(PrimaryNeonPurple, SecondaryNeonCyan)
+                                    )
+                                )
+                                .bounceClick {
+                                    coroutineScope.launch {
+                                        listState.animateScrollToItem(
+                                            (currentIndex - 2).coerceAtLeast(0)
+                                        )
+                                    }
+                                }
+                                .padding(horizontal = 14.dp, vertical = 7.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.MyLocation,
+                                    contentDescription = null,
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    "定位到当前",
+                                    color = Color.Black,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Single playlist row — own composable so Compose can skip recomposition
+// independently from the rest of the panel when only thumbnail state changes.
+@Composable
+private fun PlaylistItemRow(
+    item: PlayerMediaItem,
+    index: Int,
+    isCurrent: Boolean,
+    thumbSemaphore: kotlinx.coroutines.sync.Semaphore,
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
+
+    // Thumbnail: LRU cache hit is synchronous (zero IO on main thread).
+    // Cache miss: load behind a Semaphore so at most 4 decodes run simultaneously.
+    var thumb by remember(item.storageKey) {
+        mutableStateOf(VideoThumbnailCache.get(item.storageKey))
+    }
+    LaunchedEffect(item.storageKey) {
+        if (thumb == null) {
+            thumbSemaphore.withPermit {
+                val cached = VideoThumbnailCache.get(item.storageKey)
+                if (cached != null) {
+                    thumb = cached
+                } else {
+                    val loaded = withContext(Dispatchers.IO) {
+                        VideoThumbnailCache.load(context, item)
+                    }
+                    if (loaded != null) thumb = loaded
+                }
+            }
+        }
+    }
+
+    val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val rowScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.97f else 1f,
+        animationSpec = spring(dampingRatio = 0.8f, stiffness = 600f),
+        label = "playlistRowScale"
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer { scaleX = rowScale; scaleY = rowScale }
+            .clip(RoundedCornerShape(9.dp))
+            .background(
+                if (isCurrent)
+                    Brush.horizontalGradient(
+                        listOf(SecondaryNeonCyan.copy(alpha = 0.16f), PrimaryNeonPurple.copy(alpha = 0.08f))
+                    )
+                else
+                    Brush.horizontalGradient(
+                        listOf(Color.White.copy(alpha = 0.04f), Color.White.copy(alpha = 0.02f))
+                    )
+            )
+            .border(
+                width = if (isCurrent) 1.dp else 0.5.dp,
+                color = if (isCurrent) SecondaryNeonCyan.copy(alpha = 0.50f)
+                        else Color.White.copy(alpha = 0.06f),
+                shape = RoundedCornerShape(9.dp)
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = androidx.compose.foundation.LocalIndication.current,
+                onClick = onClick
+            )
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Thumbnail at 16:9, fixed to 80×45 dp so the Compose layout pass is O(1).
+        Box(
+            modifier = Modifier
+                .size(width = 80.dp, height = 45.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFF12121E)),
+            contentAlignment = Alignment.Center
+        ) {
+            val bmp = thumb
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    Icons.Default.VideoFile,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.18f),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            if (isCurrent) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(3.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SecondaryNeonCyan)
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    Text("播放中", color = Color.Black, fontSize = 7.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        Spacer(Modifier.width(9.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.displayName,
+                color = if (isCurrent) SecondaryNeonCyan else Color.White,
+                fontSize = 11.5.sp,
+                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 15.sp
+            )
+            Spacer(Modifier.height(3.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "${index + 1}",
+                    color = if (isCurrent) SecondaryNeonCyan.copy(alpha = 0.7f) else TextMuted,
+                    fontSize = 10.sp
+                )
+                if (item.duration > 0L) {
+                    Text(
+                        text = "  ·  ${formatDuration(item.duration)}",
+                        color = TextMuted,
+                        fontSize = 10.sp
+                    )
+                }
             }
         }
     }
