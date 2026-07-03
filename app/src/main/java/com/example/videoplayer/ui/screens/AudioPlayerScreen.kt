@@ -1,5 +1,11 @@
-﻿package com.example.videoplayer.ui.screens
+package com.example.videoplayer.ui.screens
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -27,6 +33,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -36,6 +44,7 @@ import com.example.videoplayer.data.model.MediaItem as PlayerMediaItem
 import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.data.repository.MediaRepository
 import com.example.videoplayer.ui.components.formatDuration
+import com.example.videoplayer.ui.components.bounceClick
 import com.example.videoplayer.ui.theme.*
 import kotlinx.coroutines.delay
 
@@ -67,31 +76,30 @@ fun AudioPlayerScreen(
     var currentPosition by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
 
-    // Rotation angle for vinyl record
-    var rotationAngle by remember { mutableStateOf(0f) }
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            val startTime = System.currentTimeMillis()
-            val startAngle = rotationAngle
-            while (isPlaying) {
-                val elapsed = System.currentTimeMillis() - startTime
-                rotationAngle = (startAngle + (elapsed * 0.024f)) % 360f
-                delay(16L) // ~60fps
-            }
-        }
-    }
+    // Vinyl record rotation — uses infiniteTransition so Compose can skip recomposition
+    // when not playing; the animation pauses automatically via targetValue.
+    val infiniteTransition = rememberInfiniteTransition(label = "vinyl")
+    val infiniteAngle by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 6000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "vinylRotation"
+    )
+    // When paused, freeze the last angle; when playing, advance with the infinite transition.
+    var frozenAngle by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(isPlaying) { if (!isPlaying) frozenAngle = infiniteAngle }
+    val rotationAngle = if (isPlaying) infiniteAngle else frozenAngle
 
-    // Sleep Timer state
+    // Sleep Timer: single-step countdown — avoids nested while loop inside LaunchedEffect.
     var sleepTimerSecondsLeft by remember { mutableIntStateOf(0) }
     var sleepTimerVersion by remember { mutableIntStateOf(0) }
-    LaunchedEffect(sleepTimerVersion, isPlaying) {
+    LaunchedEffect(sleepTimerSecondsLeft, isPlaying, sleepTimerVersion) {
         if (sleepTimerSecondsLeft > 0 && isPlaying) {
-            while (sleepTimerSecondsLeft > 0 && isPlaying) {
-                delay(1000L)
-                if (sleepTimerSecondsLeft > 0) {
-                    sleepTimerSecondsLeft--
-                }
-            }
+            delay(1000L)
+            sleepTimerSecondsLeft--
             if (sleepTimerSecondsLeft == 0) {
                 player?.pause()
             }
@@ -120,8 +128,17 @@ fun AudioPlayerScreen(
         val renderersFactory = DefaultRenderersFactory(context)
             .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+        // Configure audio focus and noisy-audio handling per skill guidelines:
+        // - handleAudioFocus=true: pauses on transient focus loss (phone calls, other apps)
+        // - setHandleAudioBecomingNoisy: auto-pauses when headphones are unplugged
+        val audioAttrs = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+            .build()
         val exoPlayer = ExoPlayer.Builder(context)
             .setRenderersFactory(renderersFactory)
+            .setAudioAttributes(audioAttrs, /* handleAudioFocus= */ true)
+            .setHandleAudioBecomingNoisy(true)
             .build()
             .apply {
                 setMediaItem(MediaItem.fromUri(currentAudio.uri))
@@ -151,11 +168,12 @@ fun AudioPlayerScreen(
                 currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                 if (duration <= 0) duration = exoPlayer.duration.coerceAtLeast(0L)
                 val now = System.currentTimeMillis()
+                // Save progress every 2s; poll position at 200ms for smooth slider updates.
                 if (now - lastProgressSaveAtMs >= 2000L) {
                     repository.savePlaybackProgress(currentAudio, currentPosition, duration)
                     lastProgressSaveAtMs = now
                 }
-                delay(500)
+                delay(200)
             }
         } finally {
             exoPlayer.removeListener(listener)
@@ -199,13 +217,25 @@ fun AudioPlayerScreen(
                 CenterAlignedTopAppBar(
                     title = { Text("音频播放", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
                     navigationIcon = {
-                        IconButton(onClick = onBackClick) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 12.dp)
+                                .size(40.dp)
+                                .bounceClick { onBackClick() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White, modifier = Modifier.size(24.dp))
                         }
                     },
                     actions = {
-                        IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White)
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 12.dp)
+                                .size(40.dp)
+                                .bounceClick { showMenu = true },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White, modifier = Modifier.size(24.dp))
                         }
                         DropdownMenu(
                             expanded = showMenu,
@@ -344,18 +374,55 @@ fun AudioPlayerScreen(
                 }
             }
 
-            Row(Modifier.fillMaxWidth().padding(bottom = 30.dp), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { playPrev() }, enabled = currentIndex > 0) {
-                    Icon(Icons.Default.SkipPrevious, contentDescription = "上一首", tint = if (currentIndex > 0) Color.White else Color.Gray)
-                }
-                IconButton(
-                    onClick = { player?.let { if (it.isPlaying) it.pause() else it.play() } },
-                    modifier = Modifier.size(68.dp).clip(RoundedCornerShape(34.dp)).background(PrimaryNeonPurple)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 30.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val canPrev = currentIndex > 0
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .bounceClick(enabled = canPrev) { playPrev() },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = "播放", tint = Color.White, modifier = Modifier.size(36.dp))
+                    Icon(
+                        imageVector = Icons.Default.SkipPrevious,
+                        contentDescription = "上一首",
+                        tint = if (canPrev) Color.White else Color.Gray,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
-                IconButton(onClick = { playNext() }, enabled = currentIndex < playlist.lastIndex) {
-                    Icon(Icons.Default.SkipNext, contentDescription = "下一首", tint = if (currentIndex < playlist.lastIndex) Color.White else Color.Gray)
+
+                Box(
+                    modifier = Modifier
+                        .size(68.dp)
+                        .clip(CircleShape)
+                        .background(PrimaryNeonPurple)
+                        .bounceClick { player?.let { if (it.isPlaying) it.pause() else it.play() } },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = "播放",
+                        tint = Color.White,
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+
+                val canNext = currentIndex < playlist.lastIndex
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .bounceClick(enabled = canNext) { playNext() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SkipNext,
+                        contentDescription = "下一首",
+                        tint = if (canNext) Color.White else Color.Gray,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
             }
         }

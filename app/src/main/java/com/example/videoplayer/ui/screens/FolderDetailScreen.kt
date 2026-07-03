@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.Collections
 import com.example.videoplayer.ui.components.folderDisplayName
 import com.example.videoplayer.ui.components.GlassmorphicCard
 import com.example.videoplayer.ui.components.AppBackground
+import com.example.videoplayer.ui.components.bounceClick
 import com.example.videoplayer.ui.theme.CarbonBg
 import com.example.videoplayer.ui.theme.CarbonBorder
 import com.example.videoplayer.ui.theme.SecondaryNeonCyan
@@ -159,11 +160,18 @@ fun FolderDetailScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = { if (isSelecting) selectedKeys = emptySet() else onBackClick() }) {
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 12.dp)
+                            .size(40.dp)
+                            .bounceClick { if (isSelecting) selectedKeys = emptySet() else onBackClick() },
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(
                             if (isSelecting) Icons.Default.Close else Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Back",
-                            tint = Color.White
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 },
@@ -187,7 +195,7 @@ fun FolderDetailScreen(
                                             if (isActive) SecondaryNeonCyan else Color.White.copy(alpha = 0.3f),
                                             RoundedCornerShape(6.dp)
                                         )
-                                        .clickable {
+                                        .bounceClick {
                                             gridSizeDp = size
                                             repository.setFolderGridSize(size)
                                         },
@@ -203,14 +211,19 @@ fun FolderDetailScreen(
                             }
                             Spacer(Modifier.width(4.dp))
                         }
-                        IconButton(onClick = {
-                            layoutMode = when (layoutMode) {
-                                LayoutMode.LIST -> LayoutMode.GRID
-                                LayoutMode.GRID -> LayoutMode.GALLERY
-                                LayoutMode.GALLERY -> LayoutMode.LIST
-                            }
-                            repository.setFolderLayoutMode(layoutMode)
-                        }) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .bounceClick {
+                                    layoutMode = when (layoutMode) {
+                                        LayoutMode.LIST -> LayoutMode.GRID
+                                        LayoutMode.GRID -> LayoutMode.GALLERY
+                                        LayoutMode.GALLERY -> LayoutMode.LIST
+                                    }
+                                    repository.setFolderLayoutMode(layoutMode)
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
                             Icon(
                                 imageVector = when (layoutMode) {
                                     LayoutMode.LIST -> Icons.Default.GridView
@@ -218,7 +231,8 @@ fun FolderDetailScreen(
                                     LayoutMode.GALLERY -> Icons.AutoMirrored.Filled.ViewList
                                 },
                                 contentDescription = "Switch Layout",
-                                tint = Color.White
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }

@@ -206,8 +206,25 @@ class FloatingPlayerService : Service() {
         val dm = resources.displayMetrics
         val maxW = (dm.widthPixels * 0.85f).toInt()
         val maxH = (dm.heightPixels * 0.85f).toInt()
-        var initW = FloatingPlayerManager.width.takeIf { it > 0 } ?: (dm.widthPixels / 2)
-        var initH = FloatingPlayerManager.height.takeIf { it > 0 } ?: (initW / aspectRatio).toInt()
+
+        // Calculate initial width and height based on the new aspect ratio
+        var initW = FloatingPlayerManager.width
+        var initH = FloatingPlayerManager.height
+
+        val currentRatio = if (initH > 0) initW.toFloat() / initH.toFloat() else 0f
+        // If stored size ratio differs from the video aspect ratio significantly (e.g. landscape vs portrait)
+        if (Math.abs(currentRatio - aspectRatio) > 0.05f || initW <= 0 || initH <= 0) {
+            if (aspectRatio >= 1f) {
+                // Landscape
+                initW = (dm.widthPixels / 2).coerceIn(minWidth, maxW)
+                initH = (initW / aspectRatio).toInt()
+            } else {
+                // Portrait
+                initH = (dm.heightPixels * 0.4f).toInt().coerceIn(minWidth, maxH)
+                initW = (initH * aspectRatio).toInt()
+            }
+        }
+
         if (initH > maxH) {
             initH = maxH
             initW = (initH * aspectRatio).toInt()
@@ -607,8 +624,10 @@ class FloatingPlayerService : Service() {
     }
 
     private fun initializeExoPlayer(item: MediaItem) {
+        // Enable decoder fallback so hardware decoder failures automatically retry with
+        // software decoders — improves playback robustness for high-profile 4K / exotic formats.
         val renderersFactory = DefaultRenderersFactory(applicationContext)
-            .setEnableDecoderFallback(false)
+            .setEnableDecoderFallback(true)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
 
         val is4k = item.resolution.lowercase(Locale.ROOT).contains("x") && item.resolution.split("x").mapNotNull { it.trim().toIntOrNull() }.let { parts -> parts.size >= 2 && (parts[0] >= 3500 || parts[1] >= 2000) }
@@ -655,6 +674,16 @@ class FloatingPlayerService : Service() {
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_ENDED) {
                     playNext()
+                }
+            }
+
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                val width = videoSize.width
+                val height = videoSize.height
+                if (width > 0 && height > 0) {
+                    mainHandler.post {
+                        adjustFloatingWindowAspectRatio(width.toFloat() / height.toFloat())
+                    }
                 }
             }
 
@@ -939,6 +968,65 @@ class FloatingPlayerService : Service() {
             if (w > 0 && h > 0) return w / h
         }
         return 16f / 9f
+    }
+
+    private fun adjustFloatingWindowAspectRatio(newAspectRatio: Float) {
+        if (Math.abs(aspectRatio - newAspectRatio) < 0.01f) return
+        val oldAspectRatio = aspectRatio
+        aspectRatio = newAspectRatio
+        
+        val lp = floatingView?.layoutParams as? WindowManager.LayoutParams ?: return
+        val dm = resources.displayMetrics
+        val maxW = (dm.widthPixels * 0.85f).toInt()
+        val maxH = (dm.heightPixels * 0.85f).toInt()
+
+        // Calculate maxPossibleWidth for the old aspect ratio
+        var oldMaxPossibleW = maxW
+        var oldMaxPossibleH = (oldMaxPossibleW / oldAspectRatio).toInt()
+        if (oldMaxPossibleH > maxH) {
+            oldMaxPossibleH = maxH
+            oldMaxPossibleW = (oldMaxPossibleH * oldAspectRatio).toInt()
+        }
+
+        // Determine current scale
+        val scale = (lp.width.toFloat() / oldMaxPossibleW).coerceIn(0f, 1f)
+
+        // Calculate maxPossibleWidth for the new aspect ratio
+        var newMaxPossibleW = maxW
+        var newMaxPossibleH = (newMaxPossibleW / aspectRatio).toInt()
+        if (newMaxPossibleH > maxH) {
+            newMaxPossibleH = maxH
+            newMaxPossibleW = (newMaxPossibleH * aspectRatio).toInt()
+        }
+
+        // Apply scale to get new dimensions
+        var targetWidth = (newMaxPossibleW * scale).toInt()
+        var targetHeight = (targetWidth / aspectRatio).toInt()
+
+        if (targetHeight > maxH) {
+            targetHeight = maxH
+            targetWidth = (targetHeight * aspectRatio).toInt()
+        }
+        if (targetWidth > maxW) {
+            targetWidth = maxW
+            targetHeight = (targetWidth / aspectRatio).toInt()
+        }
+        if (targetWidth < minWidth) {
+            targetWidth = minWidth
+            targetHeight = (targetWidth / aspectRatio).toInt()
+        }
+
+        lp.width = targetWidth
+        lp.height = targetHeight
+
+        val maxX = dm.widthPixels - lp.width
+        val maxY = dm.heightPixels - lp.height
+        if (lp.x > maxX) lp.x = maxX.coerceAtLeast(0)
+        if (lp.y > maxY) lp.y = maxY.coerceAtLeast(0)
+
+        safeUpdateLayout(lp)
+        FloatingPlayerManager.width = lp.width
+        FloatingPlayerManager.height = lp.height
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

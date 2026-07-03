@@ -28,6 +28,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -63,6 +64,10 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.VideoFile
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.border
 import androidx.activity.compose.BackHandler
@@ -123,6 +128,7 @@ import com.example.videoplayer.ui.components.PlayerGestureOverlay
 import com.example.videoplayer.ui.components.VideoThumbnailCache
 import com.example.videoplayer.ui.components.formatDuration
 import com.example.videoplayer.ui.components.formatFileSize
+import com.example.videoplayer.ui.components.bounceClick
 import com.example.videoplayer.ui.theme.*
 import com.example.videoplayer.util.SimpleGifEncoder
 import com.example.videoplayer.util.DlnaCastManager
@@ -130,6 +136,11 @@ import com.example.videoplayer.util.DlnaDevice
 import com.example.videoplayer.util.AudioEffectManager
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import kotlinx.coroutines.sync.withPermit
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
@@ -221,6 +232,7 @@ fun VideoPlayerScreen(
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
     var showSettings by remember { mutableStateOf(false) }
+    var showPlaylist by remember { mutableStateOf(false) }
     var virtualVolumePercent by remember { mutableIntStateOf(100) }
     var currentEqPreset by remember { mutableStateOf("Normal") }
     var showInfo by remember { mutableStateOf(false) }
@@ -246,7 +258,6 @@ fun VideoPlayerScreen(
     var resumeAfterScrub by remember { mutableStateOf(false) }
     var useVlcFallback by remember { mutableStateOf(false) }
     var isScreenLocked by remember { mutableStateOf(false) }
-    var isWaitingForFirstFrame by remember { mutableStateOf(false) }
     var isExitingScreen by remember { mutableStateOf(false) }
     var abLoopStartMs by remember { mutableStateOf<Long?>(null) }
     var abLoopEndMs by remember { mutableStateOf<Long?>(null) }
@@ -319,6 +330,11 @@ fun VideoPlayerScreen(
         FloatingPlayerManager.useVlcFallback = useVlcFallback
     }
 
+    LaunchedEffect(videoWidth, videoHeight) {
+        FloatingPlayerManager.videoWidth = videoWidth
+        FloatingPlayerManager.videoHeight = videoHeight
+    }
+
     LaunchedEffect(Unit) {
         snapshotFlow { currentPosition }.collect { position ->
             FloatingPlayerManager.currentPosition = position
@@ -349,6 +365,7 @@ fun VideoPlayerScreen(
     val swipeOffsetAnim = remember { androidx.compose.animation.core.Animatable(0f) }
     var swipeDragOffset by remember { mutableFloatStateOf(0f) }
     var isSwipeDragging by remember { mutableStateOf(false) }
+    var resumeAfterSwipe by remember { mutableStateOf(false) }
     var swipeTargetIndex by remember { mutableStateOf<Int?>(null) }
     var isSwipeAnimating by remember { mutableStateOf(false) }
     var isWaitingForReady by remember { mutableStateOf(true) }
@@ -372,7 +389,13 @@ fun VideoPlayerScreen(
         if (useVlcFallback) {
             vlcSeekTo(positionMs)
         } else {
-            seekQueue?.seekTo(positionMs, exact, force)
+            player?.let { p ->
+                val targetParams = if (exact) SeekParameters.EXACT else SeekParameters.CLOSEST_SYNC
+                if (p.seekParameters != targetParams) {
+                    p.setSeekParameters(targetParams)
+                }
+                p.seekTo(positionMs)
+            }
         }
     }
 
@@ -399,25 +422,11 @@ fun VideoPlayerScreen(
             isScrubbing = false
             seekToPosition(positionMs, exact = seekProfile.allowExactFinalSeek, force = true)
             if (resumeAfterScrub) {
+                resumeAfterScrub = false
                 if (useVlcFallback) {
-                    vlcTogglePlayPause()
-                    resumeAfterScrub = false
+                    if (!isPlaying) vlcTogglePlayPause()
                 } else {
-                    val hasVideo = player?.currentTracks?.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_VIDEO) == true
-                    if (hasVideo) {
-                        isWaitingForFirstFrame = true
-                        scope.launch {
-                            delay(800)
-                            if (isWaitingForFirstFrame) {
-                                isWaitingForFirstFrame = false
-                                resumeAfterScrub = false
-                                player?.play()
-                            }
-                        }
-                    } else {
-                        resumeAfterScrub = false
-                        player?.play()
-                    }
+                    player?.play()
                 }
             }
         } else {
@@ -479,14 +488,17 @@ fun VideoPlayerScreen(
                 targetIndex = 0
             }
         }
+        if (!isSwipeDragging) {
+            isSwipeDragging = true
+            resumeAfterSwipe = isPlaying
+            pauseCompat()
+        }
         if (targetIndex in playlist.indices) {
             swipeTargetIndex = targetIndex
-            isSwipeDragging = true
             swipeDragOffset = dragX
         } else {
             // Apply rubber-banding (drag resistance)
             swipeTargetIndex = null
-            isSwipeDragging = true
             swipeDragOffset = dragX * 0.25f
         }
     }
@@ -500,7 +512,7 @@ fun VideoPlayerScreen(
             swipeOffsetAnim.snapTo(swipeDragOffset)
             isSwipeDragging = false
             swipeDragOffset = 0f
-            val dragThreshold = screenWidthPx * 0.15f
+            val dragThreshold = screenWidthPx * 0.08f
             if (targetIndex != null && abs(totalDragX) > dragThreshold && targetIndex in playlist.indices) {
                 val direction = if (totalDragX < 0) 1 else -1
                 val targetOffset = -direction * screenWidthPx
@@ -512,7 +524,7 @@ fun VideoPlayerScreen(
                 )
 
                 markIfWatched()
-                pauseCompat()
+                // Already paused on drag start!
 
                 val targetVideo = playlist[targetIndex]
                 readyCoverVideo = targetVideo
@@ -534,6 +546,7 @@ fun VideoPlayerScreen(
                 delay(200L)
                 readyCoverVideo = null
                 isSwipeAnimating = false
+                resumeAfterSwipe = false
             } else {
                 // Cancel switch: spring back to 0
                 swipeOffsetAnim.animateTo(
@@ -542,6 +555,14 @@ fun VideoPlayerScreen(
                 )
                 swipeTargetIndex = null
                 isSwipeAnimating = false
+                if (resumeAfterSwipe) {
+                    resumeAfterSwipe = false
+                    if (useVlcFallback) {
+                        vlcTogglePlayPause()
+                    } else {
+                        player?.play()
+                    }
+                }
             }
         }
     }
@@ -624,7 +645,9 @@ fun VideoPlayerScreen(
         if (useVlcFallback) {
             vlcTogglePlayPause()
         } else {
-            player?.let { if (it.isPlaying) it.pause() else it.play() }
+            player?.let {
+                if (isPlaying) it.pause() else it.play()
+            }
         }
     }
 
@@ -955,8 +978,18 @@ fun VideoPlayerScreen(
                 }
 
                 val listener = object : Player.Listener {
-                    override fun onIsPlayingChanged(playing: Boolean) {
-                        isPlaying = playing
+                    override fun onEvents(player: Player, events: Player.Events) {
+                        if (events.containsAny(
+                                Player.EVENT_PLAY_WHEN_READY_CHANGED,
+                                Player.EVENT_PLAYBACK_STATE_CHANGED,
+                                Player.EVENT_IS_PLAYING_CHANGED
+                            )
+                        ) {
+                            val state = player.playbackState
+                            isPlaying = player.playWhenReady && 
+                                        state != Player.STATE_ENDED && 
+                                        state != Player.STATE_IDLE
+                        }
                     }
 
                     override fun onTracksChanged(currentTracks: Tracks) {
@@ -973,7 +1006,12 @@ fun VideoPlayerScreen(
                                     for (j in 0 until group.length) {
                                         val format = group.getTrackFormat(j)
                                         val mimeType = format.sampleMimeType
-                                        if (mimeType == androidx.media3.common.MimeTypes.AUDIO_RAW) {
+                                        val mimeLower = mimeType?.lowercase(Locale.ROOT) ?: ""
+                                        val codecLower = format.codecs?.lowercase(Locale.ROOT) ?: ""
+                                        val isPcmTrack = mimeLower.contains("pcm") || mimeLower.contains("raw") ||
+                                                codecLower.contains("pcm") || codecLower.contains("s24") ||
+                                                mimeType == androidx.media3.common.MimeTypes.AUDIO_RAW
+                                        if (isPcmTrack) {
                                             val encoding = format.pcmEncoding
                                             // ExoPlayer supports 8/16-bit PCM; use VLC for 24/32-bit or float PCM.
                                             if (encoding != androidx.media3.common.C.ENCODING_PCM_16BIT &&
@@ -1029,11 +1067,6 @@ fun VideoPlayerScreen(
 
                     override fun onRenderedFirstFrame() {
                         playerReadyFlow.tryEmit(Unit)
-                        if (isWaitingForFirstFrame && latestSeekQueue?.isSeeking == false) {
-                            isWaitingForFirstFrame = false
-                            resumeAfterScrub = false
-                            player?.play()
-                        }
                     }
 
                     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
@@ -1252,6 +1285,7 @@ fun VideoPlayerScreen(
             durationMs = duration,
             currentPositionMs = currentPosition,
             isLocked = isScreenLocked || isZoomed || isSphericalMode,
+            showControls = showControls && !isScreenLocked,
             isEnabled = !MainActivity.isInPipMode.value,
             onSingleTap = { showControls = !showControls },
             onCenterDoubleTap = { togglePlayPause() },
@@ -1269,27 +1303,8 @@ fun VideoPlayerScreen(
             },
             onDoubleTapSeek = { delta ->
                 val target = (currentPosition + delta).coerceIn(0L, duration.coerceAtLeast(0L))
-                val wasPlaying = isPlaying
                 currentPosition = target
-                if (wasPlaying && !useVlcFallback) {
-                    val hasVideo = player?.currentTracks?.isTypeSelected(androidx.media3.common.C.TRACK_TYPE_VIDEO) == true
-                    if (hasVideo) {
-                        pauseCompat()
-                        isWaitingForFirstFrame = true
-                        seekToPosition(target, force = true)
-                        scope.launch {
-                            delay(800)
-                            if (isWaitingForFirstFrame) {
-                                isWaitingForFirstFrame = false
-                                player?.play()
-                            }
-                        }
-                    } else {
-                        seekToPosition(target, force = true)
-                    }
-                } else {
-                    seekToPosition(target, force = true)
-                }
+                seekToPosition(target, force = true)
             },
             onScrub = { targetPos ->
                 handleScrubSeek(targetPos, finished = false)
@@ -1697,7 +1712,7 @@ fun VideoPlayerScreen(
                 BottomControls(
                     currentPosition = currentPosition,
                     duration = duration,
-                    isPlaying = isPlaying,
+                    isPlaying = if (isScrubbing) resumeAfterScrub else isPlaying,
                     canPrev = currentIndex > 0 || autoPlayNext,
                     canNext = currentIndex < playlist.lastIndex || autoPlayNext,
                     playbackSpeed = playbackSpeed,
@@ -1746,6 +1761,8 @@ fun VideoPlayerScreen(
                                 FloatingPlayerManager.currentPosition = player?.currentPosition ?: currentPosition
                                 FloatingPlayerManager.useVlcFallback = useVlcFallback
                                 FloatingPlayerManager.isFloating = true
+                                FloatingPlayerManager.videoWidth = videoWidth
+                                FloatingPlayerManager.videoHeight = videoHeight
 
                                 val p = player
                                 player = null
@@ -1784,6 +1801,7 @@ fun VideoPlayerScreen(
                     onSetCover = { selectCustomCover() },
                     onInfo = { showInfo = true },
                     onSettings = { showSettings = true },
+                    onPlaylist = { showPlaylist = true },
                     abLoopStartMs = abLoopStartMs,
                     abLoopEndMs = abLoopEndMs,
                     onAbLoopClick = { handleAbLoopClick() }
@@ -2070,6 +2088,19 @@ fun VideoPlayerScreen(
         )
     }
 
+    // Playlist panel — fullscreen overlay that slides in from the right.
+    if (showPlaylist) {
+        VideoPlaylistPanel(
+            playlist = playlist,
+            currentIndex = currentIndex,
+            onItemClick = { idx ->
+                switchToIndex(idx, if (idx > currentIndex) 1 else -1)
+                showPlaylist = false
+            },
+            onDismiss = { showPlaylist = false }
+        )
+    }
+
     if (showGifPanel) {
         InteractiveGifEditor(
             defaultStartMs = currentPosition,
@@ -2245,6 +2276,8 @@ private fun shouldPreferVlcEngine(item: PlayerMediaItem): Boolean {
     val path = item.path.lowercase(Locale.ROOT)
     val source = if (path.isNotBlank()) path else name
     val ext = source.substringAfterLast('.', missingDelimiterValue = "")
+    val hasPcmS24le = source.contains("s24le") || source.contains("s24_le") || source.contains("pcm_s24")
+    if (hasPcmS24le) return true
     return ext in setOf(
         "avi", "wmv", "asf", "vob", "ts", "m2ts", "mts", "mpg", "mpeg", "flv", "iso"
     )
@@ -2280,21 +2313,20 @@ private fun seekProfileFor(item: PlayerMediaItem, durationMs: Long): SeekProfile
     val is4k = isLikely4k(item)
     val isLargeFile = item.size > 1_500_000_000L
     val isHugeFile = item.size > 8_000_000_000L
-    val effectiveDuration = durationMs.coerceAtLeast(item.duration).coerceAtLeast(1L)
 
     return when {
         isHugeFile || (is4k && item.size > 4_000_000_000L) -> SeekProfile(
-            dragDecodeIntervalMs = 280L,
-            minPositionDeltaMs = maxOf(1_800L, effectiveDuration / 320L),
-            allowExactFinalSeek = false
+            dragDecodeIntervalMs = 40L,
+            minPositionDeltaMs = 0L,
+            allowExactFinalSeek = true
         )
         isLargeFile || is4k -> SeekProfile(
-            dragDecodeIntervalMs = 170L,
-            minPositionDeltaMs = maxOf(900L, effectiveDuration / 560L),
-            allowExactFinalSeek = false
+            dragDecodeIntervalMs = 30L,
+            minPositionDeltaMs = 0L,
+            allowExactFinalSeek = true
         )
         else -> SeekProfile(
-            dragDecodeIntervalMs = 80L,
+            dragDecodeIntervalMs = 20L,
             minPositionDeltaMs = 0L,
             allowExactFinalSeek = true
         )
@@ -2361,14 +2393,19 @@ private fun ExactVideoSeekBar(
     var dragTargetMs by remember { mutableLongStateOf(positionMs) }
     val shownPosition = dragTargetMs.takeIf { it >= 0L } ?: positionMs
 
+    val currentDurationMs by rememberUpdatedState(durationMs)
+    val currentWidthPx by rememberUpdatedState(widthPx)
+
     LaunchedEffect(positionMs) {
         dragTargetMs = positionMs
     }
 
     fun targetFromX(x: Float): Long {
-        if (durationMs <= 0L || widthPx <= 0) return 0L
-        val fraction = (x / widthPx.toFloat()).coerceIn(0f, 1f)
-        return (durationMs * fraction).toLong().coerceIn(0L, durationMs)
+        val dur = currentDurationMs
+        val w = currentWidthPx
+        if (dur <= 0L || w <= 0) return 0L
+        val fraction = (x / w.toFloat()).coerceIn(0f, 1f)
+        return (dur * fraction).toLong().coerceIn(0L, dur)
     }
 
     fun updateTarget(x: Float, finished: Boolean) {
@@ -2382,19 +2419,19 @@ private fun ExactVideoSeekBar(
         modifier = modifier
             .height(28.dp)
             .onGloballyPositioned { widthPx = it.size.width }
-            .pointerInput(durationMs, widthPx) {
+            .pointerInput(Unit) {
                 detectTapGestures { offset ->
                     updateTarget(offset.x, finished = true)
                 }
             }
-            .pointerInput(durationMs, widthPx) {
+            .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = { offset -> updateTarget(offset.x, finished = false) },
                     onDrag = { change, _ ->
                         change.consume()
                         updateTarget(change.position.x, finished = false)
                     },
-                    onDragEnd = { onSeekFinished(dragTargetMs.coerceIn(0L, durationMs.coerceAtLeast(0L))) },
+                    onDragEnd = { onSeekFinished(dragTargetMs.coerceIn(0L, currentDurationMs.coerceAtLeast(0L))) },
                     onDragCancel = { dragTargetMs = positionMs }
                 )
             }
@@ -3005,8 +3042,13 @@ private fun TopControls(
             .padding(start = 12.dp, end = 12.dp, top = 24.dp, bottom = 18.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onBackClick) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .bounceClick { onBackClick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White, modifier = Modifier.size(24.dp))
         }
         Column(Modifier.weight(1f)) {
             Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -3054,11 +3096,17 @@ private fun TopControls(
                 fontWeight = FontWeight.Bold
             )
         }
-        IconButton(onClick = onFavoriteClick) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .bounceClick { onFavoriteClick() },
+            contentAlignment = Alignment.Center
+        ) {
             Icon(
                 if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                 contentDescription = "收藏",
-                tint = if (isFavorite) AccentPink else Color.White
+                tint = if (isFavorite) AccentPink else Color.White,
+                modifier = Modifier.size(24.dp)
             )
         }
     }
@@ -3087,6 +3135,7 @@ private fun BottomControls(
     onSetCover: () -> Unit,
     onInfo: () -> Unit,
     onSettings: () -> Unit,
+    onPlaylist: () -> Unit,
     abLoopStartMs: Long?,
     abLoopEndMs: Long?,
     onAbLoopClick: () -> Unit
@@ -3164,28 +3213,52 @@ private fun BottomControls(
                 contentAlignment = Alignment.CenterStart
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onRotate) {
-                        Icon(Icons.Default.ScreenRotation, contentDescription = "旋转", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onRotate() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.ScreenRotation, contentDescription = "旋转", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = onCast) {
-                        Icon(Icons.Default.Cast, contentDescription = "投屏", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onCast() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Cast, contentDescription = "投屏", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = onPip) {
-                        Icon(Icons.Default.PictureInPicture, contentDescription = "小窗播放", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onPip() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.PictureInPicture, contentDescription = "小窗播放", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    IconButton(onClick = onScreenshot) {
-                        Icon(Icons.Default.CameraAlt, contentDescription = "截图", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onScreenshot() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.CameraAlt, contentDescription = "截图", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    TextButton(onClick = onGif) {
+                    TextButton(
+                        onClick = onGif,
+                        modifier = Modifier.bounceClick { onGif() }
+                    ) {
                         Text("GIF", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
-                    TextButton(onClick = onSetCover) {
+                    TextButton(
+                        onClick = onSetCover,
+                        modifier = Modifier.bounceClick { onSetCover() }
+                    ) {
                         Text("封面", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
-                    IconButton(onClick = onInfo) {
-                        Icon(Icons.Default.Info, contentDescription = "视频信息", tint = Color.White)
+                    Box(
+                        modifier = Modifier.size(44.dp).bounceClick { onInfo() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Info, contentDescription = "视频信息", tint = Color.White, modifier = Modifier.size(20.dp))
                     }
-                    TextButton(onClick = onAbLoopClick) {
+                    TextButton(
+                        onClick = onAbLoopClick,
+                        modifier = Modifier.bounceClick { onAbLoopClick() }
+                    ) {
                         Text(
                             text = when {
                                 abLoopStartMs != null && abLoopEndMs != null -> "A-B"
@@ -3197,7 +3270,10 @@ private fun BottomControls(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    TextButton(onClick = { showSpeedPanel = !showSpeedPanel }) {
+                    TextButton(
+                        onClick = { showSpeedPanel = !showSpeedPanel },
+                        modifier = Modifier.bounceClick { showSpeedPanel = !showSpeedPanel }
+                    ) {
                         Text("${playbackSpeed}x", color = Color.White, fontSize = 12.sp)
                     }
                 }
@@ -3206,15 +3282,21 @@ private fun BottomControls(
                 contentAlignment = Alignment.Center
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onPrev, enabled = canPrev) {
-                        Icon(Icons.Default.SkipPrevious, contentDescription = "上一个", tint = if (canPrev) Color.White else Color.Gray)
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .bounceClick(enabled = canPrev) { onPrev() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.SkipPrevious, contentDescription = "上一个", tint = if (canPrev) Color.White else Color.Gray, modifier = Modifier.size(28.dp))
                     }
-                    IconButton(
-                        onClick = onPlayPause,
+                    Box(
                         modifier = Modifier
                             .size(58.dp)
-                            .clip(RoundedCornerShape(29.dp))
+                            .clip(CircleShape)
                             .background(SecondaryNeonCyan)
+                            .bounceClick { onPlayPause() },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -3223,8 +3305,13 @@ private fun BottomControls(
                             modifier = Modifier.size(34.dp)
                         )
                     }
-                    IconButton(onClick = onNext, enabled = canNext) {
-                        Icon(Icons.Default.SkipNext, contentDescription = "下一个", tint = if (canNext) Color.White else Color.Gray)
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .bounceClick(enabled = canNext) { onNext() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.SkipNext, contentDescription = "下一个", tint = if (canNext) Color.White else Color.Gray, modifier = Modifier.size(28.dp))
                     }
                 }
             }
@@ -3232,8 +3319,23 @@ private fun BottomControls(
                 modifier = Modifier.weight(1f),
                 contentAlignment = Alignment.CenterEnd
             ) {
-                IconButton(onClick = onSettings) {
-                    Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .bounceClick { onPlaylist() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.QueueMusic, contentDescription = "播放列表", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .bounceClick { onSettings() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Settings, contentDescription = "设置", tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
                 }
             }
         }
@@ -4015,7 +4117,7 @@ private fun CastDeviceSelectionDialog(
                         modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(devices) { device ->
+                        items(devices, key = { it.location }) { device ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -4310,6 +4412,356 @@ private fun CastRemoteControlOverlay(
                     fontSize = 9.sp,
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 )
+            }
+        }
+    }
+}
+
+// ————————————————————————————————————————————————————————————————————————————
+// VideoPlaylistPanel
+//
+// Performance decisions for massive libraries (android-logic-best-practices skill):
+//   • key = storageKey  →  item identity stable across index shifts; Compose skips
+//                          recomposition for off-screen items on any list change.
+//   • contentType        →  slot-table reuse: all rows share the same composable shape.
+//   • Semaphore(4)       →  caps concurrent thumbnail IO so memory stays flat even when
+//                          the user flings through thousands of rows in one gesture.
+//   • derivedStateOf     →  jump-FAB visibility reads scroll state without triggering a
+//                          full panel recomposition on every frame.
+//   • VideoThumbnailCache (LRU) → subsequent renders read Bitmap from memory, zero disk IO.
+// ————————————————————————————————————————————————————————————————————————————
+@Composable
+fun VideoPlaylistPanel(
+    playlist: List<PlayerMediaItem>,
+    currentIndex: Int,
+    onItemClick: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+
+    // Auto-scroll to current item when panel first opens.
+    LaunchedEffect(Unit) {
+        if (currentIndex in playlist.indices) {
+            listState.scrollToItem((currentIndex - 2).coerceAtLeast(0))
+        }
+    }
+
+    // derivedStateOf: recompute only when scroll state changes, not on every frame.
+    val showJumpButton by remember {
+        derivedStateOf {
+            val first = listState.firstVisibleItemIndex
+            val visibleCount = listState.layoutInfo.visibleItemsInfo.size
+            currentIndex !in first..(first + visibleCount)
+        }
+    }
+
+    // Semaphore: at most 4 concurrent thumbnail decodes to keep heap pressure flat.
+    val thumbSemaphore = remember { kotlinx.coroutines.sync.Semaphore(4) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(
+                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(0.70f)
+                .align(Alignment.CenterEnd)
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null
+                ) {}
+                .background(
+                    brush = Brush.horizontalGradient(
+                        listOf(
+                            Color(0xFF080810).copy(alpha = 0.0f),
+                            Color(0xFF0C0C1A)
+                        )
+                    )
+                )
+                .border(
+                    width = 0.5.dp,
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            SecondaryNeonCyan.copy(alpha = 0.30f),
+                            PrimaryNeonPurple.copy(alpha = 0.18f)
+                        )
+                    ),
+                    shape = RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp)
+                )
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+
+                // Header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0C0C1A))
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.QueueMusic,
+                        contentDescription = null,
+                        tint = SecondaryNeonCyan,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "播放列表",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = "${playlist.size} 个",
+                        color = TextMuted,
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.08f))
+                            .bounceClick { onDismiss() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "关闭列表",
+                            tint = Color.White.copy(alpha = 0.65f),
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                }
+
+                // Thin gradient divider
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(SecondaryNeonCyan.copy(alpha = 0.4f), PrimaryNeonPurple.copy(alpha = 0.2f), Color.Transparent)
+                            )
+                        )
+                )
+
+                // List
+                Box(modifier = Modifier.weight(1f)) {
+                    LazyColumn(
+                        state = listState,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        itemsIndexed(
+                            items = playlist,
+                            key = { _, item -> item.storageKey },
+                            contentType = { _, _ -> "playlist_row" }
+                        ) { idx, item ->
+                            PlaylistItemRow(
+                                item = item,
+                                index = idx,
+                                isCurrent = idx == currentIndex,
+                                thumbSemaphore = thumbSemaphore,
+                                onClick = { onItemClick(idx) }
+                            )
+                        }
+                    }
+
+                    // Jump-to-current FAB — only visible when current item is off-screen
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = showJumpButton,
+                        enter = fadeIn() + slideInVertically { it / 2 },
+                        exit = fadeOut() + slideOutVertically { it / 2 },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 14.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(PrimaryNeonPurple, SecondaryNeonCyan)
+                                    )
+                                )
+                                .bounceClick {
+                                    coroutineScope.launch {
+                                        listState.animateScrollToItem(
+                                            (currentIndex - 2).coerceAtLeast(0)
+                                        )
+                                    }
+                                }
+                                .padding(horizontal = 14.dp, vertical = 7.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.MyLocation,
+                                    contentDescription = null,
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    "定位到当前",
+                                    color = Color.Black,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Single playlist row — own composable so Compose can skip recomposition
+// independently from the rest of the panel when only thumbnail state changes.
+@Composable
+private fun PlaylistItemRow(
+    item: PlayerMediaItem,
+    index: Int,
+    isCurrent: Boolean,
+    thumbSemaphore: kotlinx.coroutines.sync.Semaphore,
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
+
+    // Thumbnail: LRU cache hit is synchronous (zero IO on main thread).
+    // Cache miss: load behind a Semaphore so at most 4 decodes run simultaneously.
+    var thumb by remember(item.storageKey) {
+        mutableStateOf(VideoThumbnailCache.get(item.storageKey))
+    }
+    LaunchedEffect(item.storageKey) {
+        if (thumb == null) {
+            thumbSemaphore.withPermit {
+                val cached = VideoThumbnailCache.get(item.storageKey)
+                if (cached != null) {
+                    thumb = cached
+                } else {
+                    val loaded = withContext(Dispatchers.IO) {
+                        VideoThumbnailCache.load(context, item)
+                    }
+                    if (loaded != null) thumb = loaded
+                }
+            }
+        }
+    }
+
+    val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val rowScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.97f else 1f,
+        animationSpec = spring(dampingRatio = 0.8f, stiffness = 600f),
+        label = "playlistRowScale"
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .graphicsLayer { scaleX = rowScale; scaleY = rowScale }
+            .clip(RoundedCornerShape(9.dp))
+            .background(
+                if (isCurrent)
+                    Brush.horizontalGradient(
+                        listOf(SecondaryNeonCyan.copy(alpha = 0.16f), PrimaryNeonPurple.copy(alpha = 0.08f))
+                    )
+                else
+                    Brush.horizontalGradient(
+                        listOf(Color.White.copy(alpha = 0.04f), Color.White.copy(alpha = 0.02f))
+                    )
+            )
+            .border(
+                width = if (isCurrent) 1.dp else 0.5.dp,
+                color = if (isCurrent) SecondaryNeonCyan.copy(alpha = 0.50f)
+                        else Color.White.copy(alpha = 0.06f),
+                shape = RoundedCornerShape(9.dp)
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = androidx.compose.foundation.LocalIndication.current,
+                onClick = onClick
+            )
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Thumbnail at 16:9, fixed to 80×45 dp so the Compose layout pass is O(1).
+        Box(
+            modifier = Modifier
+                .size(width = 80.dp, height = 45.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFF12121E)),
+            contentAlignment = Alignment.Center
+        ) {
+            val bmp = thumb
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    Icons.Default.VideoFile,
+                    contentDescription = null,
+                    tint = Color.White.copy(alpha = 0.18f),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            if (isCurrent) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(3.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(SecondaryNeonCyan)
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    Text("播放中", color = Color.Black, fontSize = 7.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        Spacer(Modifier.width(9.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.displayName,
+                color = if (isCurrent) SecondaryNeonCyan else Color.White,
+                fontSize = 11.5.sp,
+                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 15.sp
+            )
+            Spacer(Modifier.height(3.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "${index + 1}",
+                    color = if (isCurrent) SecondaryNeonCyan.copy(alpha = 0.7f) else TextMuted,
+                    fontSize = 10.sp
+                )
+                if (item.duration > 0L) {
+                    Text(
+                        text = "  ·  ${formatDuration(item.duration)}",
+                        color = TextMuted,
+                        fontSize = 10.sp
+                    )
+                }
             }
         }
     }

@@ -29,6 +29,7 @@ import com.example.videoplayer.ui.theme.CardObsidian
 import com.example.videoplayer.ui.theme.ObsidianBg
 import com.example.videoplayer.ui.theme.SecondaryNeonCyan
 import com.example.videoplayer.ui.theme.TextSecondary
+import com.example.videoplayer.ui.components.bounceClick
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,8 +52,14 @@ fun SettingsScreen(
             TopAppBar(
                 title = { Text("设置", color = Color.White, fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 12.dp)
+                            .size(40.dp)
+                            .bounceClick { onBackClick() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White, modifier = Modifier.size(24.dp))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = ObsidianBg)
@@ -206,7 +213,7 @@ private fun TutorialButton(text: String, desc: String, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
+            .bounceClick { onClick() }
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
