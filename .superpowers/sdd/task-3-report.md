@@ -68,3 +68,10 @@ Implementation: `3a09a8f refactor: centralize media library state`.
 ### Remaining limitation
 
 The normal Android Gradle unit-test task is still blocked before test execution by the pre-existing `VideoPlayerScreen.kt` errors at lines 4538 and 4620. The standalone compile-and-run evidence above verifies the pure store and its tests without that unrelated source file; repository adaptation was source-reviewed because the blocked Android compilation cannot reach it.
+
+## Second review follow-up: cancelled forced refresh
+
+- Added `ordinaryRefreshAfterCancelledForcedRefreshDoesNotJoinStaleOrdinaryScan` for ordinary A, forced B, cancelled B, then ordinary C. It requires C to create generation 3, complete, and publish without waiting for stale A.
+- RED command: standalone Kotlin 1.9.22 compilation of the three pure library/test files followed by `org.junit.runner.JUnitCore com.example.videoplayer.data.library.MediaLibraryStoreTest`. Output: `Tests run: 9, Failures: 1`; C produced `[false, true]` instead of `[false, true, false]`.
+- GREEN command: the same standalone compiler/JUnit command. Output: `OK (9 tests)`.
+- Request selection now reuses an active forced or ordinary request only when its generation equals the current generation; otherwise it creates a new request.

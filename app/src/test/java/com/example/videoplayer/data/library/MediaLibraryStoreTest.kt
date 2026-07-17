@@ -77,6 +77,29 @@ class MediaLibraryStoreTest {
     }
 
     @Test
+    fun ordinaryRefreshAfterCancelledForcedRefreshDoesNotJoinStaleOrdinaryScan() = runBlocking {
+        val scanner = DeferredScanner()
+        val store = MediaLibraryStore(scanner)
+        val ordinaryA = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        scanner.started(0).await()
+        val forcedB = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = true) }
+        scanner.started(1).await()
+        forcedB.cancelAndJoin()
+
+        val ordinaryC = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        assertEquals(listOf(false, true, false), scanner.calls)
+        scanner.complete(2, success(videos = listOf(media("current"))))
+        ordinaryC.await()
+        scanner.complete(0, success(videos = listOf(media("stale"))))
+        ordinaryA.await()
+
+        assertEquals(3, store.state.value.generation)
+        assertEquals(listOf(media("current")), store.state.value.videos)
+    }
+
+    @Test
     fun concurrentNonForcedRefreshesShareOneScan() = runBlocking {
         val scanner = DeferredScanner()
         val store = MediaLibraryStore(scanner)

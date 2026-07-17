@@ -41,8 +41,13 @@ class MediaLibraryStore(
 
     private suspend fun selectRequest(force: Boolean): RequestSelection = refreshMutex.withLock {
         if (!force) {
-            activeForcedRefresh?.let { return@withLock RequestSelection(it, startsScan = false) }
-            activeNonForcedRefresh?.let { return@withLock RequestSelection(it, startsScan = false) }
+            val currentGeneration = generation.get()
+            activeForcedRefresh
+                ?.takeIf { it.generation == currentGeneration }
+                ?.let { return@withLock RequestSelection(it, startsScan = false) }
+            activeNonForcedRefresh
+                ?.takeIf { it.generation == currentGeneration }
+                ?.let { return@withLock RequestSelection(it, startsScan = false) }
         }
 
         val request = RefreshRequest(
