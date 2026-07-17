@@ -46,6 +46,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.Cast
@@ -4535,7 +4536,7 @@ fun VideoPlaylistPanel(
                     }
 
                     // Jump-to-current FAB — only visible when current item is off-screen
-                    AnimatedVisibility(
+                    androidx.compose.animation.AnimatedVisibility(
                         visible = showJumpButton,
                         enter = fadeIn() + slideInVertically { it / 2 },
                         exit = fadeOut() + slideOutVertically { it / 2 },
