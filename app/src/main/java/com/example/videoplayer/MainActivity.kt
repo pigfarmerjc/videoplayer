@@ -145,9 +145,6 @@ class MainActivity : ComponentActivity() {
                                     activeVideoItemId = itemId
                                     activeVideoFolderName = folderName
                                 },
-                                onNavigateToAudio = { itemId, folderName ->
-                                    navController.navigate("audio/$itemId/${Uri.encode(folderName)}")
-                                },
                                 onNavigateToPhoto = { itemId, folderName ->
                                     navController.navigate("photo/$itemId/${Uri.encode(folderName)}")
                                 },
@@ -210,9 +207,7 @@ class MainActivity : ComponentActivity() {
                                     activeVideoItemId = itemId
                                     activeVideoFolderName = fName
                                 },
-                                onNavigateToAudio = { itemId, fName ->
-                                    navController.navigate("audio/$itemId/${Uri.encode(fName)}")
-                                },
+                                onNavigateToAudio = { _, _ -> },
                                 onNavigateToPhoto = { itemId, fName ->
                                     navController.navigate("photo/$itemId/${Uri.encode(fName)}")
                                 }
@@ -220,37 +215,6 @@ class MainActivity : ComponentActivity() {
                         }
 
 
-
-                        // Futuristic Equalized Audio Screen (Fade & Scale)
-                        composable(
-                            route = "audio/{itemId}/{folderName}",
-                            arguments = listOf(
-                                navArgument("itemId") { type = NavType.LongType },
-                                navArgument("folderName") { type = NavType.StringType }
-                            ),
-                            enterTransition = {
-                                fadeIn(animationSpec = fadeTween) + scaleIn(initialScale = 0.94f, animationSpec = scaleTween)
-                            },
-                            exitTransition = {
-                                fadeOut(animationSpec = fadeTween) + scaleOut(targetScale = 0.94f, animationSpec = scaleTween)
-                            },
-                            popEnterTransition = {
-                                fadeIn(animationSpec = fadeTween)
-                            },
-                            popExitTransition = {
-                                fadeOut(animationSpec = fadeTween) + scaleOut(targetScale = 0.94f, animationSpec = scaleTween)
-                            }
-                        ) { backStackEntry ->
-                            val itemId = backStackEntry.arguments?.getLong("itemId") ?: 0L
-                            val folderName = backStackEntry.arguments?.getString("folderName") ?: ""
-                            AudioPlayerScreen(
-                                itemId = itemId,
-                                folderName = folderName,
-                                mediaItems = mediaItemsState.value,
-                                repository = repository,
-                                onBackClick = { navController.popBackStack() }
-                            )
-                        }
 
                         // Pinch Zoom Gallery View (Fade & Scale)
                         composable(

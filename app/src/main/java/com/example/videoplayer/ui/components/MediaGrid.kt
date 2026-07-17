@@ -742,7 +742,6 @@ fun FolderGridTile(
 
 fun folderDisplayName(name: String): String = when (name) {
     MediaRepository.ALL_VIDEOS -> "全部视频"
-    MediaRepository.ALL_AUDIOS -> "全部音频"
     MediaRepository.ALL_PHOTOS -> "全部照片"
     MediaRepository.INTERNAL_VIDEOS -> "本机视频"
     MediaRepository.TF_CARD_VIDEOS -> "TF 卡视频"

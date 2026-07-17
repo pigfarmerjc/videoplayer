@@ -98,7 +98,6 @@ fun MainScreen(
     onSelectedTabChange: (Int) -> Unit,
     onNavigateToFolder: (String) -> Unit,
     onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToAudio: (Long, String) -> Unit,
     onNavigateToPhoto: (Long, String) -> Unit,
     onNavigateToSettings: () -> Unit,
     onMediaItemsLoaded: (List<MediaItem>) -> Unit = {}
@@ -110,23 +109,14 @@ fun MainScreen(
     var isLoading by remember { mutableStateOf(false) }
     var mediaItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var folders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
-    var searchQuery by remember { mutableStateOf("") }
-
-    // 防抖搜索：300ms 延迟后更新过滤
-    var debouncedQuery by remember { mutableStateOf("") }
-    LaunchedEffect(searchQuery) {
-        delay(300)
-        debouncedQuery = searchQuery
-    }
 
     var sortMode by remember { mutableStateOf(SortMode.BY_TIME) }
     var watchedLast by remember { mutableStateOf(repository.isWatchedLastEnabled()) }
 
-    // 网格/列表模式（文件夹、视频 & 音频 Tab 独立保存）
+    // 网格/列表模式（文件夹、视频 Tab 独立保存）
     var folderGridMode by remember { mutableStateOf(repository.isMainFolderGridModeEnabled()) }
     var videoLayoutMode by remember { mutableStateOf(repository.getVideoLayoutMode()) }
     var videoGalleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
-    var audioGridMode by remember { mutableStateOf(repository.isAudioGridModeEnabled()) }
     // 视频网格尺寸档位: 140=小, 220=中, 320=大
     var videoGridSizeDp by remember { mutableIntStateOf(repository.getVideoGridSize()) }
     // 首次启动显示主界面功能教程
@@ -152,7 +142,10 @@ fun MainScreen(
 
     val requiredPermissions = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.READ_MEDIA_IMAGES)
+            arrayOf(
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_IMAGES
+            )
         } else {
             arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
@@ -228,46 +221,31 @@ fun MainScreen(
     // ── Offload filtering and sorting to background thread ──
     var filteredFolders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
     var filteredVideos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var filteredAudios by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var filteredPhotos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var filteredFavorites by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
 
-    LaunchedEffect(folders, debouncedQuery) {
-        val result = withContext(Dispatchers.Default) {
-            if (debouncedQuery.isBlank()) {
-                folders
-            } else {
-                folders.filter {
-                    it.name.contains(debouncedQuery, ignoreCase = true) ||
-                        it.path.contains(debouncedQuery, ignoreCase = true) ||
-                        it.items.any { item -> item.displayName.contains(debouncedQuery, ignoreCase = true) }
-                }
-            }
-        }
-        filteredFolders = result
+    LaunchedEffect(folders) {
+        filteredFolders = folders
     }
 
-    LaunchedEffect(mediaItems, debouncedQuery, sortMode, watchedLast, resumeTrigger) {
+    LaunchedEffect(mediaItems, sortMode, watchedLast, resumeTrigger) {
         val result = withContext(Dispatchers.Default) {
             val watchedSet = if (watchedLast) repository.watchedKeySnapshot() else emptySet()
             FilteredMedia(
-                videos = sortMedia(mediaItems.filter { it.type == MediaType.VIDEO && it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet),
-                audios = sortMedia(mediaItems.filter { it.type == MediaType.AUDIO && it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet),
-                photos = sortMedia(mediaItems.filter { it.type == MediaType.PHOTO && it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet),
-                favorites = sortMedia(repository.favoriteItems(mediaItems).filter { it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet)
+                videos = sortMedia(mediaItems.filter { it.type == MediaType.VIDEO }, sortMode, watchedLast, watchedSet),
+                photos = sortMedia(mediaItems.filter { it.type == MediaType.PHOTO }, sortMode, watchedLast, watchedSet),
+                favorites = sortMedia(repository.favoriteItems(mediaItems), sortMode, watchedLast, watchedSet)
             )
         }
         filteredVideos = result.videos
-        filteredAudios = result.audios
         filteredPhotos = result.photos
         filteredFavorites = result.favorites
     }
 
-    val progressItems = remember(selectedTab, filteredVideos, filteredAudios, filteredFavorites) {
+    val progressItems = remember(selectedTab, filteredVideos, filteredFavorites) {
         when (selectedTab) {
             1 -> filteredVideos
-            2 -> filteredAudios
-            4 -> filteredFavorites
+            3 -> filteredFavorites
             else -> emptyList()
         }
     }
@@ -299,7 +277,6 @@ fun MainScreen(
                     onRefresh = { if (hasPermission) scope.launch { reload(forceRefresh = true) } },
                     onSettings = onNavigateToSettings
                 )
-                SearchBox(searchQuery, onQueryChange = { searchQuery = it })
                 SortToolbar(
                     sortMode = sortMode,
                     onSortModeChange = { sortMode = it },
@@ -308,17 +285,15 @@ fun MainScreen(
                         watchedLast = it
                         repository.setWatchedLastEnabled(it)
                     },
-                    // 仅文件夹/视频/音频 Tab 显示网格切换按钮
-                    showLayoutToggle = selectedTab == 0 || selectedTab == 1 || selectedTab == 2,
+                    // 仅文件夹/视频 Tab 显示网格切换按钮
+                    showLayoutToggle = selectedTab == 0 || selectedTab == 1,
                     currentLayoutMode = when (selectedTab) {
                         0 -> if (folderGridMode) LayoutMode.GRID else LayoutMode.LIST
                         1 -> videoLayoutMode
-                        2 -> if (audioGridMode) LayoutMode.GRID else LayoutMode.LIST
                         else -> LayoutMode.LIST
                     },
                     showSizeToggle = when (selectedTab) {
                         1 -> videoLayoutMode == LayoutMode.GRID
-                        2 -> audioGridMode
                         else -> false
                     },
                     currentGridSizeDp = videoGridSizeDp,
@@ -339,10 +314,6 @@ fun MainScreen(
                                     LayoutMode.GALLERY -> LayoutMode.LIST
                                 }
                                 repository.setVideoLayoutMode(videoLayoutMode)
-                            }
-                            2 -> {
-                                audioGridMode = !audioGridMode
-                                repository.setAudioGridModeEnabled(audioGridMode)
                             }
                         }
                     }
@@ -367,7 +338,7 @@ fun MainScreen(
                             }
                             1 -> when (videoLayoutMode) {
                                 LayoutMode.LIST -> {
-                                    MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
+                                    MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
                                 }
                                 LayoutMode.GRID -> {
                                     MediaGridView(
@@ -377,7 +348,6 @@ fun MainScreen(
                                         repository = repository,
                                         gridSizeDp = videoGridSizeDp,
                                         onNavigateToVideo = onNavigateToVideo,
-                                        onNavigateToAudio = onNavigateToAudio,
                                         onNavigateToPhoto = onNavigateToPhoto
                                     )
                                 }
@@ -392,27 +362,12 @@ fun MainScreen(
                                             repository.setGalleryColumnCount(cols)
                                         },
                                         onNavigateToVideo = onNavigateToVideo,
-                                        onNavigateToAudio = onNavigateToAudio,
                                         onNavigateToPhoto = onNavigateToPhoto
                                     )
                                 }
                             }
-                            2 -> if (audioGridMode) {
-                                MediaGridView(
-                                    items = filteredAudios,
-                                    folderName = MediaRepository.ALL_AUDIOS,
-                                    progressSnapshot = progressSnapshot,
-                                    repository = repository,
-                                    gridSizeDp = videoGridSizeDp,
-                                    onNavigateToVideo = onNavigateToVideo,
-                                    onNavigateToAudio = onNavigateToAudio,
-                                    onNavigateToPhoto = onNavigateToPhoto
-                                )
-                            } else {
-                                MediaList(filteredAudios, MediaRepository.ALL_AUDIOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
-                            }
-                            3 -> PhotoGrid(filteredPhotos, onNavigateToPhoto)
-                            4 -> MediaList(filteredFavorites, MediaRepository.FAVORITES, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
+                            2 -> PhotoGrid(filteredPhotos, onNavigateToPhoto)
+                            3 -> MediaList(filteredFavorites, MediaRepository.FAVORITES, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
                         }
                     }
                 }
@@ -487,40 +442,6 @@ private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
                 contentAlignment = Alignment.Center
             ) {
                 Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(20.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun SearchBox(query: String, onQueryChange: (String) -> Unit) {
-    GlassmorphicCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(50.dp),
-        cornerRadius = 14.dp,
-        shadowElevation = 1.dp
-    ) {
-        Row(Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.Search, contentDescription = null, tint = SecondaryNeonCyan, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(10.dp))
-            TextField(
-                value = query,
-                onValueChange = onQueryChange,
-                placeholder = { Text("搜索视频、音频、图片...", color = TextMuted, fontSize = 14.sp) },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent,
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                )
-            )
-            if (query.isNotEmpty()) {
-                Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color.White, modifier = Modifier.size(18.dp).clickable { onQueryChange("") })
             }
         }
     }
@@ -688,7 +609,6 @@ private fun MediaList(
     onFavorite: (MediaItem) -> Unit,
     onPlaylist: (MediaItem) -> Unit,
     onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToAudio: (Long, String) -> Unit,
     onNavigateToPhoto: (Long, String) -> Unit
 ) {
     if (items.isEmpty()) {
@@ -712,7 +632,7 @@ private fun MediaList(
                     onClick = {
                         when (item.type) {
                             MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
-                            MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
+                            MediaType.AUDIO -> Unit
                             MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
                         }
                     }
@@ -730,7 +650,6 @@ private fun MediaGridView(
     repository: MediaRepository,
     gridSizeDp: Int = 220,
     onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToAudio: (Long, String) -> Unit,
     onNavigateToPhoto: (Long, String) -> Unit
 ) {
     if (items.isEmpty()) {
@@ -755,7 +674,7 @@ private fun MediaGridView(
                     onClick = {
                         when (item.type) {
                             MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
-                            MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
+                            MediaType.AUDIO -> Unit
                             MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
                         }
                     }
@@ -808,7 +727,7 @@ private fun PermissionView(onGrantClick: () -> Unit) {
             Spacer(Modifier.height(14.dp))
             Text("Media Permission Required", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            Text("The app needs media access to scan your local video, audio, and images.", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
+            Text("The app needs media access to scan your local videos and images.", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
             Spacer(Modifier.height(22.dp))
             Button(onClick = onGrantClick, colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeonPurple), shape = RoundedCornerShape(10.dp)) {
                 Text("Grant Permission", color = Color.White, fontWeight = FontWeight.Bold)
@@ -877,9 +796,8 @@ fun GlassmorphicBottomNavBar(
         ) {
             NavBarItem(Icons.Default.Folder, "文件夹", selectedTab == 0) { onTabSelected(0) }
             NavBarItem(Icons.Default.PlayCircle, "视频", selectedTab == 1) { onTabSelected(1) }
-            NavBarItem(Icons.Default.MusicNote, "音频", selectedTab == 2) { onTabSelected(2) }
-            NavBarItem(Icons.Default.Image, "图片", selectedTab == 3) { onTabSelected(3) }
-            NavBarItem(Icons.Default.Star, "收藏", selectedTab == 4) { onTabSelected(4) }
+            NavBarItem(Icons.Default.Image, "图片", selectedTab == 2) { onTabSelected(2) }
+            NavBarItem(Icons.Default.Star, "收藏", selectedTab == 3) { onTabSelected(3) }
         }
     }
 }
@@ -930,7 +848,6 @@ private enum class SortMode(val label: String) {
 
 private data class FilteredMedia(
     val videos: List<MediaItem>,
-    val audios: List<MediaItem>,
     val photos: List<MediaItem>,
     val favorites: List<MediaItem>
 )
@@ -1071,7 +988,6 @@ private fun MediaGalleryView(
     columnsCount: Int,
     onColumnsChange: (Int) -> Unit,
     onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToAudio: (Long, String) -> Unit,
     onNavigateToPhoto: (Long, String) -> Unit
 ) {
     if (items.isEmpty()) {
@@ -1098,7 +1014,7 @@ private fun MediaGalleryView(
                     onClick = {
                         when (item.type) {
                             MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
-                            MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
+                            MediaType.AUDIO -> Unit
                             MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
                         }
                     }

@@ -32,7 +32,6 @@ class MediaRepository(private val context: Context) {
 
     companion object {
         const val ALL_VIDEOS = "ALL_VIDEOS"
-        const val ALL_AUDIOS = "ALL_AUDIOS"
         const val ALL_PHOTOS = "ALL_PHOTOS"
         const val INTERNAL_VIDEOS = "INTERNAL_VIDEOS"
         const val TF_CARD_VIDEOS = "TF_CARD_VIDEOS"
@@ -44,10 +43,6 @@ class MediaRepository(private val context: Context) {
         private val videoExtensions = setOf(
             "mp4", "m4v", "mkv", "webm", "avi", "3gp", "3g2", "ts", "m2ts", "mts",
             "mov", "flv", "mpg", "mpeg", "vob", "wmv", "asf", "iso"
-        )
-        private val audioExtensions = setOf(
-            "mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "alac",
-            "ape", "amr", "ac3", "eac3", "dts", "mka", "wma", "mid", "midi"
         )
         private val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif")
         private const val MEDIA_CACHE_TTL_MS = 10 * 60 * 1000L
@@ -67,12 +62,10 @@ class MediaRepository(private val context: Context) {
         val items = linkedMapOf<String, MediaItem>()
         val videosDeferred = async { scanVideos(interner) }
         val isoDeferred = async { scanIsoFiles(interner) }
-        val audiosDeferred = async { scanAudios(interner) }
         val imagesDeferred = async { scanImages(interner) }
 
         videosDeferred.await().forEach { items[it.uniqueKey] = it }
         isoDeferred.await().forEach { items[it.uniqueKey] = it }
-        audiosDeferred.await().forEach { items[it.uniqueKey] = it }
         imagesDeferred.await().forEach { items[it.uniqueKey] = it }
 
         if (forceRefresh) {
@@ -81,7 +74,7 @@ class MediaRepository(private val context: Context) {
 
         val allPrefs = prefs.all
         items.values.map { item ->
-            if (item.type == MediaType.VIDEO || item.type == MediaType.AUDIO) {
+            if (item.type == MediaType.VIDEO) {
                 val savedDuration = (allPrefs["duration:${item.uniqueKey}"] as? Long) ?: 0L
                 val savedResolution = allPrefs["resolution:${item.uniqueKey}"] as? String
                 if (savedDuration > 0L || !savedResolution.isNullOrBlank()) {
@@ -116,7 +109,6 @@ class MediaRepository(private val context: Context) {
     fun resolveFolderItems(folderName: String, items: List<MediaItem>): List<MediaItem> {
         val resolved = when (folderName) {
             ALL_VIDEOS -> items.filter { it.type == MediaType.VIDEO }
-            ALL_AUDIOS -> items.filter { it.type == MediaType.AUDIO }
             ALL_PHOTOS -> items.filter { it.type == MediaType.PHOTO }
             INTERNAL_VIDEOS -> items.filter { it.type == MediaType.VIDEO && isInternalPath(it.path) }
             TF_CARD_VIDEOS -> items.filter { it.type == MediaType.VIDEO && !isInternalPath(it.path) }
@@ -348,12 +340,6 @@ class MediaRepository(private val context: Context) {
         prefs.edit().putInt("gallery_column_count", count.coerceIn(2, 12)).apply()
     }
 
-    fun isAudioGridModeEnabled(): Boolean = prefs.getBoolean("audio_grid_mode", false)
-
-    fun setAudioGridModeEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean("audio_grid_mode", enabled).apply()
-    }
-
     // 视频网格尺寸：140 = 小，220 = 中，320 = 大
     fun getVideoGridSize(): Int = prefs.getInt("video_grid_size", 220).let {
         if (it in setOf(140, 220, 320)) it else 220
@@ -473,14 +459,13 @@ class MediaRepository(private val context: Context) {
 
     private fun buildFolders(items: List<MediaItem>): List<MediaFolder> {
         val videos = mutableListOf<MediaItem>()
-        val audios = mutableListOf<MediaItem>()
         val photos = mutableListOf<MediaItem>()
         val physicalMap = mutableMapOf<String, MutableList<MediaItem>>()
 
         items.forEach { item ->
             when (item.type) {
                 MediaType.VIDEO -> videos.add(item)
-                MediaType.AUDIO -> audios.add(item)
+                MediaType.AUDIO -> Unit
                 MediaType.PHOTO -> photos.add(item)
             }
             // Use folderName as key for grouping
@@ -498,7 +483,6 @@ class MediaRepository(private val context: Context) {
         val tfVideos = videos.filter { !isInternalPath(it.path) }
         if (tfVideos.isNotEmpty()) folders.add(MediaFolder(TF_CARD_VIDEOS, "SD Card Videos", tfVideos))
         
-        if (audios.isNotEmpty()) folders.add(MediaFolder(ALL_AUDIOS, "All Audios", audios))
         if (photos.isNotEmpty()) folders.add(MediaFolder(ALL_PHOTOS, "All Photos", photos))
         
         // 2. Specialized Virtual Folders
@@ -645,36 +629,6 @@ class MediaRepository(private val context: Context) {
         }
     }
 
-    private fun scanAudios(interner: StringInterner): List<MediaItem> {
-        val projection = arrayOf(
-            MediaStore.Audio.Media._ID,
-            MediaStore.Audio.Media.DISPLAY_NAME,
-            MediaStore.Audio.Media.TITLE,
-            MediaStore.Audio.Media.DATA,
-            MediaStore.Audio.Media.SIZE,
-            MediaStore.Audio.Media.DATE_ADDED,
-            MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.ARTIST
-        )
-        return query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, projection) { cursor ->
-            val id = cursor.getLong(MediaStore.Audio.Media._ID)
-            val path = cursor.getStringOrEmpty(MediaStore.Audio.Media.DATA)
-            MediaItem(
-                id = id,
-                uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id),
-                title = cursor.getStringOrEmpty(MediaStore.Audio.Media.TITLE).ifEmpty { cursor.getStringOrEmpty(MediaStore.Audio.Media.DISPLAY_NAME) },
-                displayName = cursor.getStringOrEmpty(MediaStore.Audio.Media.DISPLAY_NAME).ifEmpty { "Unknown audio" },
-                path = path,
-                folderName = getParentFolderName(path, interner),
-                size = cursor.getLong(MediaStore.Audio.Media.SIZE),
-                dateAdded = cursor.getLong(MediaStore.Audio.Media.DATE_ADDED),
-                duration = cursor.getLong(MediaStore.Audio.Media.DURATION),
-                type = MediaType.AUDIO,
-                artist = interner.intern(cursor.getStringOrEmpty(MediaStore.Audio.Media.ARTIST).ifEmpty { "Unknown Artist" })
-            )
-        }
-    }
-
     private fun scanImages(interner: StringInterner): List<MediaItem> {
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
@@ -724,7 +678,6 @@ class MediaRepository(private val context: Context) {
 
     private fun typeFromExtension(ext: String): MediaType? = when (ext) {
         in videoExtensions -> MediaType.VIDEO
-        in audioExtensions -> MediaType.AUDIO
         in imageExtensions -> MediaType.PHOTO
         else -> null
     }
