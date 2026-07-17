@@ -5,6 +5,9 @@ import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.provider.MediaStore
+import com.example.videoplayer.data.library.MediaLibraryScanResult
+import com.example.videoplayer.data.library.MediaLibraryScanner
+import com.example.videoplayer.data.library.MediaQueryResult
 import com.example.videoplayer.data.model.MediaFolder
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.model.MediaType
@@ -16,7 +19,7 @@ import java.io.File
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
-class MediaRepository(private val context: Context) {
+class MediaRepository(private val context: Context) : MediaLibraryScanner {
     @Volatile private var cachedItems: List<MediaItem>? = null
     @Volatile private var cachedAtMs: Long = 0L
     // Lazy initialize SharedPreferences to avoid repeated getSharedPreferences calls (#9)
@@ -54,26 +57,28 @@ class MediaRepository(private val context: Context) {
         return cachedItems != null && now - cachedAtMs < MEDIA_CACHE_TTL_MS
     }
 
-    suspend fun scanMedia(forceRefresh: Boolean = false): List<MediaItem> = withContext(Dispatchers.IO) {
+    override suspend fun scan(force: Boolean): MediaLibraryScanResult = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
-        cachedItems?.takeIf { !forceRefresh && now - cachedAtMs < MEDIA_CACHE_TTL_MS }?.let { return@withContext it }
+        cachedItems?.takeIf { !force && now - cachedAtMs < MEDIA_CACHE_TTL_MS }?.let {
+            return@withContext it.toLibraryScanResult()
+        }
 
         val interner = StringInterner()
         val items = linkedMapOf<String, MediaItem>()
-        val videosDeferred = async { scanVideos(interner) }
-        val isoDeferred = async { scanIsoFiles(interner) }
-        val imagesDeferred = async { scanImages(interner) }
+        val videosDeferred = async { runCatching { scanVideos(interner) + scanIsoFiles(interner) } }
+        val imagesDeferred = async { runCatching { scanImages(interner) } }
+        val videoQuery = videosDeferred.await()
+        val photoQuery = imagesDeferred.await()
 
-        videosDeferred.await().forEach { items[it.uniqueKey] = it }
-        isoDeferred.await().forEach { items[it.uniqueKey] = it }
-        imagesDeferred.await().forEach { items[it.uniqueKey] = it }
+        videoQuery.getOrNull()?.forEach { items[it.uniqueKey] = it }
+        photoQuery.getOrNull()?.forEach { items[it.uniqueKey] = it }
 
-        if (forceRefresh) {
+        if (force) {
             scanPhysicalRoots(items, interner)
         }
 
         val allPrefs = prefs.all
-        items.values.map { item ->
+        val normalized = items.values.map { item ->
             if (item.type == MediaType.VIDEO) {
                 val savedDuration = (allPrefs["duration:${item.uniqueKey}"] as? Long) ?: 0L
                 val savedResolution = allPrefs["resolution:${item.uniqueKey}"] as? String
@@ -91,10 +96,28 @@ class MediaRepository(private val context: Context) {
         }.sortedWith(
             compareByDescending<MediaItem> { it.dateAdded }
                 .thenBy { it.displayName.lowercase(Locale.ROOT) }
-        ).also {
-            cachedItems = it
+        )
+
+        if (videoQuery.isSuccess && photoQuery.isSuccess) {
+            cachedItems = normalized
             cachedAtMs = now
         }
+
+        MediaLibraryScanResult(
+            videos = videoQuery.fold(
+                onSuccess = { MediaQueryResult.Success(normalized.filter { item -> item.type == MediaType.VIDEO }) },
+                onFailure = { MediaQueryResult.Failure(it) }
+            ),
+            photos = photoQuery.fold(
+                onSuccess = { MediaQueryResult.Success(normalized.filter { item -> item.type == MediaType.PHOTO }) },
+                onFailure = { MediaQueryResult.Failure(it) }
+            )
+        )
+    }
+
+    suspend fun scanMedia(forceRefresh: Boolean = false): List<MediaItem> {
+        val result = scan(forceRefresh)
+        return result.videos.itemsOrEmpty() + result.photos.itemsOrEmpty()
     }
 
     suspend fun getFolders(items: List<MediaItem>): List<MediaFolder> = withContext(Dispatchers.Default) {
@@ -670,6 +693,18 @@ class MediaRepository(private val context: Context) {
             }
         }
         return list
+    }
+
+    private fun List<MediaItem>.toLibraryScanResult(): MediaLibraryScanResult {
+        return MediaLibraryScanResult(
+            videos = MediaQueryResult.Success(filter { it.type == MediaType.VIDEO }),
+            photos = MediaQueryResult.Success(filter { it.type == MediaType.PHOTO })
+        )
+    }
+
+    private fun MediaQueryResult.itemsOrEmpty(): List<MediaItem> = when (this) {
+        is MediaQueryResult.Success -> items
+        is MediaQueryResult.Failure -> emptyList()
     }
 
     private fun isInternalPath(path: String): Boolean {
