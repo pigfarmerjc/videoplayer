@@ -59,6 +59,9 @@ import com.example.videoplayer.data.model.MediaFolder
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.data.repository.MediaRepository
+import com.example.videoplayer.media.thumbnail.ThumbnailPriority
+import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
+import com.example.videoplayer.media.thumbnail.ThumbnailSize
 import com.example.videoplayer.ui.theme.AccentPink
 import com.example.videoplayer.ui.theme.CardObsidian
 import com.example.videoplayer.ui.theme.PrimaryNeonPurple
@@ -752,13 +755,13 @@ fun folderDisplayName(name: String): String = when (name) {
 }
 
 @Composable
-fun mediaPreviewRequest(item: MediaItem): ImageRequest {
+fun mediaPreviewRequest(item: MediaItem, allowAnimated: Boolean = true): ImageRequest {
     val context = LocalContext.current
     return remember(item.storageKey, context) {
         val builder = ImageRequest.Builder(context)
             .data(item.uri)
             .crossfade(false)
-        if (item.type == MediaType.PHOTO && item.displayName.endsWith(".gif", ignoreCase = true)) {
+        if (allowAnimated && item.type == MediaType.PHOTO && item.displayName.endsWith(".gif", ignoreCase = true)) {
             if (android.os.Build.VERSION.SDK_INT >= 28) {
                 builder.decoderFactory(ImageDecoderDecoder.Factory())
             } else {
@@ -773,16 +776,16 @@ fun mediaPreviewRequest(item: MediaItem): ImageRequest {
 private fun LightweightMediaPreview(item: MediaItem, contentDescription: String?) {
     if (item.type == MediaType.VIDEO) {
         val context = LocalContext.current
-        var bitmapState by remember(item.storageKey) {
-            mutableStateOf(VideoThumbnailCache.get(item.storageKey))
-        }
+        var bitmapState by remember(item.id) { mutableStateOf<Bitmap?>(null) }
 
-        LaunchedEffect(item.storageKey) {
-            if (VideoThumbnailCache.get(item.storageKey) == null) {
-                val bitmap = VideoThumbnailCache.load(context, item)
-                if (bitmap != null) {
-                    bitmapState = bitmap
-                }
+        LaunchedEffect(item.id, item.uri) {
+            ThumbnailSchedulerProvider.request(
+                context = context,
+                item = item,
+                size = ThumbnailSize(360, 220),
+                priority = ThumbnailPriority.VISIBLE
+            ).collect { result ->
+                bitmapState = result.value
             }
         }
 
@@ -799,7 +802,7 @@ private fun LightweightMediaPreview(item: MediaItem, contentDescription: String?
         }
     } else {
         AsyncImage(
-            model = mediaPreviewRequest(item),
+            model = mediaPreviewRequest(item, allowAnimated = false),
             contentDescription = contentDescription,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop
