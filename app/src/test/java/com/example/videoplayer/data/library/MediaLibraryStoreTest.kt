@@ -5,6 +5,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -25,12 +27,12 @@ class MediaLibraryStoreTest {
 
         scanner.complete(1, success(videos = listOf(media("newer"))))
         second.await()
-        scanner.complete(0, success(videos = listOf(media("older"))))
-        first.await()
+        first.join()
 
         assertEquals(2, store.state.value.generation)
         assertEquals(listOf(media("newer")), store.state.value.videos)
         assertFalse(store.state.value.isRefreshing)
+        assertTrue(first.isCancelled)
     }
 
     @Test
@@ -48,16 +50,17 @@ class MediaLibraryStoreTest {
         scanner.complete(1, success(videos = listOf(media("forced"))))
         forcedB.await()
         ordinaryC.await()
-        scanner.complete(0, success(videos = listOf(media("ordinary"))))
-        ordinaryA.await()
+        ordinaryA.join()
 
         assertEquals(2, store.state.value.generation)
         assertEquals(listOf(media("forced")), store.state.value.videos)
+        assertTrue(ordinaryA.isCancelled)
     }
 
     @Test
     fun ordinaryRefreshAfterCompletedForcedRefreshDoesNotJoinStaleOrdinaryScan() = runBlocking {
         val scanner = DeferredScanner()
+        scanner.ignoreCancellationFor(0)
         val store = MediaLibraryStore(scanner)
         val ordinaryA = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
 
@@ -72,7 +75,7 @@ class MediaLibraryStoreTest {
         assertEquals(listOf(false, true), scanner.calls)
         assertTrue(ordinaryC.isCompleted)
         scanner.complete(0, success(videos = listOf(media("ordinary"))))
-        ordinaryA.await()
+        ordinaryA.join()
         ordinaryC.await()
     }
 
@@ -90,10 +93,10 @@ class MediaLibraryStoreTest {
         val ordinaryC = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
 
         assertEquals(listOf(false, true, false), scanner.calls)
+        assertEquals(1, scanner.maxActiveNonForcedScans)
         scanner.complete(2, success(videos = listOf(media("current"))))
         ordinaryC.await()
-        scanner.complete(0, success(videos = listOf(media("stale"))))
-        ordinaryA.await()
+        ordinaryA.join()
 
         assertEquals(3, store.state.value.generation)
         assertEquals(listOf(media("current")), store.state.value.videos)
@@ -206,16 +209,36 @@ class MediaLibraryStoreTest {
 
     private class DeferredScanner : MediaLibraryScanner {
         val calls = mutableListOf<Boolean>()
+        var maxActiveNonForcedScans = 0
+            private set
+        private var activeNonForcedScans = 0
+        private val nonCancellableCalls = mutableSetOf<Int>()
         private val results = MutableList(4) { CompletableDeferred<MediaLibraryScanResult>() }
         private val started = MutableList(4) { CompletableDeferred<Unit>() }
 
         override suspend fun scan(force: Boolean): MediaLibraryScanResult {
             val index = synchronized(this) {
                 calls += force
+                if (!force) {
+                    activeNonForcedScans++
+                    maxActiveNonForcedScans = maxOf(maxActiveNonForcedScans, activeNonForcedScans)
+                }
                 calls.lastIndex
             }
             started[index].complete(Unit)
-            return results[index].await()
+            return try {
+                if (index in nonCancellableCalls) {
+                    withContext(NonCancellable) { results[index].await() }
+                } else {
+                    results[index].await()
+                }
+            } finally {
+                if (!force) {
+                    synchronized(this) {
+                        activeNonForcedScans--
+                    }
+                }
+            }
         }
 
         fun started(index: Int): CompletableDeferred<Unit> = started[index]
@@ -226,6 +249,10 @@ class MediaLibraryStoreTest {
 
         fun fail(index: Int, error: Throwable) {
             results[index].completeExceptionally(error)
+        }
+
+        fun ignoreCancellationFor(index: Int) {
+            nonCancellableCalls += index
         }
     }
 }

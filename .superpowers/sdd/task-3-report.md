@@ -75,3 +75,10 @@ The normal Android Gradle unit-test task is still blocked before test execution 
 - RED command: standalone Kotlin 1.9.22 compilation of the three pure library/test files followed by `org.junit.runner.JUnitCore com.example.videoplayer.data.library.MediaLibraryStoreTest`. Output: `Tests run: 9, Failures: 1`; C produced `[false, true]` instead of `[false, true, false]`.
 - GREEN command: the same standalone compiler/JUnit command. Output: `OK (9 tests)`.
 - Request selection now reuses an active forced or ordinary request only when its generation equals the current generation; otherwise it creates a new request.
+
+## Final review follow-up: serialized ordinary lane
+
+- Added active ordinary-scan accounting to the A → B → cancel B → C test. RED command: the standalone Kotlin 1.9.22 compile plus JUnit 4.13.2 invocation for `MediaLibraryStoreTest`; output was `expected:<1> but was:<2>`, proving stale A and new C were concurrently scanning with `force=false`.
+- Each refresh request now owns a lazy coroutine job. Starting forced B cancels stale ordinary A, while C waits for A's `finished` signal outside the mutex before it can create a new ordinary request.
+- The completed-B reuse test retains a cancellation-resistant A until explicit completion, proving that C still reuses completed forced B while the stale ordinary lane is being cleared.
+- GREEN command: standalone Kotlin 1.9.22 compile plus JUnit 4.13.2 invocation for `MediaLibraryStoreTest`; output: `OK (9 tests)`.
