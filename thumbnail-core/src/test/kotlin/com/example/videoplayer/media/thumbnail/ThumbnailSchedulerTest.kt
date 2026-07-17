@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -120,7 +121,7 @@ class ThumbnailSchedulerTest {
     }
 
     @Test
-    fun cancellationResistantOldFlightCannotPublishOverNewRequestForSameKey() = runBlocking {
+    fun cancellationResistantOldFlightKeepsDecodePermitUntilPhysicalCompletion() = runBlocking {
         val cache = DeferredThumbnailCache()
         val scheduler = scheduler(cache)
         val resource = resource("video-1", version = 10)
@@ -135,14 +136,54 @@ class ThumbnailSchedulerTest {
         val replacement = async(start = CoroutineStart.UNDISPATCHED) {
             scheduler.request(resource, "new-source", size, ThumbnailPriority.VISIBLE).single()
         }
+        assertEquals(1, cache.maxActiveDecodes)
+        assertEquals(null, withTimeoutOrNull(100) { cache.awaitDecodeStart(resource, size, 2) })
+
+        cache.completeDecode(resource, size, 1, "stale-frame")
+        cache.awaitDecodeCompletion(resource, size, 1)
         cache.awaitDecodeStart(resource, size, 2)
         cache.completeDecode(resource, size, 2, "new-frame")
         assertEquals("new-frame", replacement.await().value)
 
-        cache.completeDecode(resource, size, 1, "stale-frame")
-        cache.awaitDecodeCompletion(resource, size, 1)
-
+        assertTrue(cache.maxActiveDecodes <= 1)
         assertEquals(listOf("new-frame"), cache.memoryWrites.map { it.value })
+    }
+
+    @Test
+    fun boundedDiskWriteQueueDropsOldestPendingWriteWithoutBlockingResults() = runBlocking {
+        val cache = DeferredThumbnailCache().apply { holdDiskWrites() }
+        val scheduler = scheduler(cache, diskWriteCapacity = 1)
+        val size = ThumbnailSize(180, 120)
+        val first = resource("first", 1)
+        val second = resource("second", 1)
+        val third = resource("third", 1)
+
+        val firstResult = async(start = CoroutineStart.UNDISPATCHED) {
+            scheduler.request(first, "first", size, ThumbnailPriority.VISIBLE).single()
+        }
+        cache.awaitDecodeStart(first, size, 1)
+        cache.completeDecode(first, size, 1, "first-frame")
+        firstResult.await()
+        cache.awaitDiskWriteStart()
+
+        val secondResult = async(start = CoroutineStart.UNDISPATCHED) {
+            scheduler.request(second, "second", size, ThumbnailPriority.VISIBLE).single()
+        }
+        cache.awaitDecodeStart(second, size, 1)
+        cache.completeDecode(second, size, 1, "second-frame")
+        secondResult.await()
+
+        val thirdResult = async(start = CoroutineStart.UNDISPATCHED) {
+            scheduler.request(third, "third", size, ThumbnailPriority.VISIBLE).single()
+        }
+        cache.awaitDecodeStart(third, size, 1)
+        cache.completeDecode(third, size, 1, "third-frame")
+        thirdResult.await()
+
+        cache.releaseDiskWrites()
+        cache.awaitDiskWrites(2)
+
+        assertEquals(listOf("first-frame", "third-frame"), cache.diskWrites)
     }
 
     @Test
@@ -163,11 +204,15 @@ class ThumbnailSchedulerTest {
         dateModified = version
     )
 
-    private fun scheduler(cache: DeferredThumbnailCache): ThumbnailScheduler<String, String> =
+    private fun scheduler(
+        cache: DeferredThumbnailCache,
+        diskWriteCapacity: Int = 16
+    ): ThumbnailScheduler<String, String> =
         ThumbnailScheduler(
             cache = cache,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
-            decodeWorkerCount = 1
+            decodeWorkerCount = 1,
+            diskWriteCapacity = diskWriteCapacity
         )
 
     private class DeferredThumbnailCache : ThumbnailCache<String, String> {
@@ -175,14 +220,21 @@ class ThumbnailSchedulerTest {
         val disk = mutableMapOf<ThumbnailKey, String>()
         val decodeStarts = mutableListOf<DecodeStart>()
         val memoryWrites = mutableListOf<MemoryWrite>()
+        val diskWrites = mutableListOf<String>()
+        var maxActiveDecodes = 0
+            private set
         private var memoryLookups = 0
         private var diskCompletions = 0
+        private var activeDecodes = 0
+        private var holdDiskWrites = false
         private val diskStarted = mutableMapOf<ThumbnailKey, CompletableDeferred<Unit>>()
         private val delayedDisk = mutableMapOf<ThumbnailKey, CompletableDeferred<String?>>()
         private val decodeStarted = mutableMapOf<DecodeAttempt, CompletableDeferred<Unit>>()
         private val decodeResults = mutableMapOf<DecodeAttempt, CompletableDeferred<String?>>()
         private val decodeCompletions = mutableMapOf<DecodeAttempt, CompletableDeferred<Unit>>()
         private val cancellationResistantAttempts = mutableSetOf<DecodeAttempt>()
+        private val diskWriteStarted = CompletableDeferred<Unit>()
+        private val diskWriteRelease = CompletableDeferred<Unit>()
 
         override suspend fun loadMemory(key: ThumbnailKey): String? = synchronized(this) {
             memoryLookups++
@@ -209,13 +261,20 @@ class ThumbnailSchedulerTest {
             }
             val result = synchronized(this) { decodeResults.getOrPut(attempt) { CompletableDeferred() } }
             return try {
+                synchronized(this) {
+                    activeDecodes++
+                    maxActiveDecodes = maxOf(maxActiveDecodes, activeDecodes)
+                }
                 if (attempt in cancellationResistantAttempts) {
                     withContext(NonCancellable) { result.await() }
                 } else {
                     result.await()
                 }
             } finally {
-                synchronized(this) { decodeCompletions.getOrPut(attempt) { CompletableDeferred() }.complete(Unit) }
+                synchronized(this) {
+                    activeDecodes--
+                    decodeCompletions.getOrPut(attempt) { CompletableDeferred() }.complete(Unit)
+                }
             }
         }
 
@@ -226,7 +285,14 @@ class ThumbnailSchedulerTest {
             }
         }
 
-        override suspend fun writeDisk(key: ThumbnailKey, value: String) = Unit
+        override suspend fun writeDisk(key: ThumbnailKey, value: String) {
+            val waitForRelease = synchronized(this) {
+                diskWrites += value
+                holdDiskWrites
+            }
+            diskWriteStarted.complete(Unit)
+            if (waitForRelease) diskWriteRelease.await()
+        }
 
         fun delayDisk(resource: ThumbnailResourceIdentity, size: ThumbnailSize) {
             synchronized(this) { delayedDisk[ThumbnailKey(resource, size)] = CompletableDeferred() }
@@ -238,6 +304,24 @@ class ThumbnailSchedulerTest {
 
         fun ignoreDecodeCancellation(resource: ThumbnailResourceIdentity, size: ThumbnailSize, attempt: Int) {
             synchronized(this) { cancellationResistantAttempts += DecodeAttempt(ThumbnailKey(resource, size), attempt) }
+        }
+
+        fun holdDiskWrites() {
+            holdDiskWrites = true
+        }
+
+        fun releaseDiskWrites() {
+            diskWriteRelease.complete(Unit)
+        }
+
+        suspend fun awaitDiskWriteStart() {
+            withTimeout(1_000) { diskWriteStarted.await() }
+        }
+
+        suspend fun awaitDiskWrites(count: Int) {
+            withTimeout(1_000) {
+                while (synchronized(this) { diskWrites.size } < count) kotlinx.coroutines.yield()
+            }
         }
 
         suspend fun awaitDiskStart(resource: ThumbnailResourceIdentity, size: ThumbnailSize) {

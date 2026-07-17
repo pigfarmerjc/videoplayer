@@ -3,6 +3,7 @@ package com.example.videoplayer.media.thumbnail
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -14,14 +15,19 @@ import java.util.concurrent.atomic.AtomicLong
 class ThumbnailScheduler<T : Any, S : Any>(
     private val cache: ThumbnailCache<T, S>,
     private val scope: CoroutineScope,
-    private val decodeWorkerCount: Int = 2
+    private val decodeWorkerCount: Int = 2,
+    diskWriteCapacity: Int = 32
 ) {
     private val commands = Channel<Command<T, S>>(Channel.UNLIMITED)
-    private val diskWrites = Channel<DiskWrite<T>>(Channel.UNLIMITED)
+    private val diskWrites = Channel<DiskWrite<T>>(
+        capacity = diskWriteCapacity,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     private val requestIds = AtomicLong()
 
     init {
         require(decodeWorkerCount > 0) { "decodeWorkerCount must be positive" }
+        require(diskWriteCapacity > 0) { "diskWriteCapacity must be positive" }
         scope.launch { processCommands() }
         scope.launch {
             for (write in diskWrites) {
@@ -168,7 +174,6 @@ class ThumbnailScheduler<T : Any, S : Any>(
                         inFlight.remove(command.key, flight)
                         flight.diskLookupJob?.cancel()
                         flight.decodeJob?.cancel()
-                        releaseDecodePermit(flight)
                     }
                     startQueuedDecodes()
                 }
