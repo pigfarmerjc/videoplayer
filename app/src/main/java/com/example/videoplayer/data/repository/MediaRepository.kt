@@ -363,11 +363,17 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
     }
 
     fun getGalleryColumnCount(): Int {
-        return prefs.getInt("gallery_column_count", 4).coerceIn(2, 12)
+        return prefs.getInt("gallery_column_count", 4).coerceIn(2, 8)
     }
 
     fun setGalleryColumnCount(count: Int) {
-        prefs.edit().putInt("gallery_column_count", count.coerceIn(2, 12)).apply()
+        prefs.edit().putInt("gallery_column_count", count.coerceIn(2, 8)).apply()
+    }
+
+    fun getGalleryAspectMode(): String? = prefs.getString("gallery_aspect_mode", null)
+
+    fun setGalleryAspectMode(value: String) {
+        prefs.edit().putString("gallery_aspect_mode", value).apply()
     }
 
     // 视频网格尺寸：140 = 小，220 = 中，320 = 大

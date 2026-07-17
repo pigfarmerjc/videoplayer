@@ -8,10 +8,12 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -28,6 +30,8 @@ import androidx.compose.ui.unit.dp
 import com.example.videoplayer.ui.theme.GalleryIceBlue
 import com.example.videoplayer.ui.theme.GalleryRaisedSurface
 import kotlinx.coroutines.delay
+import java.time.Instant
+import java.time.ZoneId
 
 @Composable
 internal fun TimelineScrubber(
@@ -54,8 +58,8 @@ internal fun TimelineScrubber(
         exit = fadeOut(),
         modifier = modifier.testTag("timeline-scrubber")
     ) {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier
                 .background(GalleryRaisedSurface.copy(alpha = 0.9f), RoundedCornerShape(10.dp))
                 .padding(horizontal = 5.dp, vertical = 7.dp)
@@ -75,21 +79,38 @@ internal fun TimelineScrubber(
                     )
                 }
         ) {
-            sections.forEachIndexed { index, _ ->
-                Box(
-                    Modifier
-                        .size(
-                            width = if (index == activeSectionIndex) 4.dp else 2.dp,
-                            height = if (index == activeSectionIndex) 16.dp else 10.dp
-                        )
-                        .background(
-                            color = GalleryIceBlue.copy(
-                                alpha = if (index == activeSectionIndex) 1f else 0.42f
-                            ),
-                            shape = RoundedCornerShape(2.dp)
-                        )
-                )
+            Text(
+                text = sections.getOrNull(activeSectionIndex)?.scrubberLabel().orEmpty(),
+                color = GalleryIceBlue,
+                modifier = Modifier.testTag("timeline-scrubber-label")
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                sections.forEachIndexed { index, _ ->
+                    Box(
+                        Modifier
+                            .size(
+                                width = if (index == activeSectionIndex) 4.dp else 2.dp,
+                                height = if (index == activeSectionIndex) 16.dp else 10.dp
+                            )
+                            .background(
+                                color = GalleryIceBlue.copy(
+                                    alpha = if (index == activeSectionIndex) 1f else 0.42f
+                                ),
+                                shape = RoundedCornerShape(2.dp)
+                            )
+                    )
+                }
             }
         }
     }
+}
+
+private fun VideoSection<GalleryVideo>.scrubberLabel(): String = when (val sectionKey = key) {
+    is VideoSectionKey.Month -> "${sectionKey.yearMonth.year}年${sectionKey.yearMonth.monthValue}月"
+    else -> items.firstOrNull()?.let { item ->
+        val date = Instant.ofEpochSecond(item.dateAddedEpochSeconds)
+            .atZone(ZoneId.systemDefault())
+            .toLocalDate()
+        "${date.monthValue}月${date.dayOfMonth}日"
+    } ?: sectionTitle(this)
 }

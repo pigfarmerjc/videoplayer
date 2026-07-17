@@ -68,7 +68,6 @@ fun FolderDetailScreen(
     repository: MediaRepository,
     onBackClick: () -> Unit,
     onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToAudio: (Long, String) -> Unit,
     onNavigateToPhoto: (Long, String) -> Unit
 ) {
     val folderItems = remember(folderName, mediaItems) {
@@ -133,8 +132,8 @@ fun FolderDetailScreen(
         } else {
             when (item.type) {
                 MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
-                MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
                 MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+                else -> Unit
             }
         }
     }

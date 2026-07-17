@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -32,6 +33,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,6 +65,10 @@ import com.example.videoplayer.ui.theme.GalleryTextMuted
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -70,8 +76,13 @@ fun VideoGalleryScreen(
     videos: List<MediaItem>,
     playbackProgress: Map<String, Float>,
     columnCount: Int,
+    aspectMode: GalleryAspectMode,
     onColumnsChange: (Int) -> Unit,
     onNavigateToVideo: (Long, String) -> Unit,
+    onShare: (List<MediaItem>) -> Unit,
+    onAddToPlaylist: (List<MediaItem>) -> Unit,
+    onDelete: (List<MediaItem>) -> Unit,
+    gridState: LazyGridState = rememberLazyGridState(),
     modifier: Modifier = Modifier
 ) {
     val galleryVideos = remember(videos) { videos.map(::GalleryVideo) }
@@ -81,8 +92,6 @@ fun VideoGalleryScreen(
     val continueWatching = remember(galleryVideos, playbackProgress) {
         deriveContinueWatching(galleryVideos, playbackProgress)
     }
-    val gridState = rememberLazyGridState()
-    val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
     val sectionStarts = remember(sections) {
@@ -92,6 +101,17 @@ fun VideoGalleryScreen(
                 add(itemIndex)
                 itemIndex += section.items.size + 1
             }
+        }
+    }
+    val scrubRequests = remember {
+        MutableSharedFlow<Int>(
+            extraBufferCapacity = 1,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST
+        )
+    }
+    LaunchedEffect(gridState, sectionStarts) {
+        scrubRequests.distinctUntilChanged().collectLatest { sectionIndex ->
+            gridState.scrollToItem(sectionStarts.getOrElse(sectionIndex) { 0 })
         }
     }
 
@@ -115,6 +135,7 @@ fun VideoGalleryScreen(
                     columnCount = columnCount,
                     selectedKeys = selectedKeys,
                     progress = playbackProgress,
+                    aspectMode = aspectMode,
                     state = gridState,
                     onColumnsChange = onColumnsChange,
                     onVideoClick = { item ->
@@ -138,9 +159,7 @@ fun VideoGalleryScreen(
                     }.coerceAtLeast(0),
                     isScrolling = gridState.isScrollInProgress,
                     onSectionSelected = { sectionIndex ->
-                        scope.launch {
-                            gridState.scrollToItem(sectionStarts.getOrElse(sectionIndex) { 0 })
-                        }
+                        scrubRequests.tryEmit(sectionIndex)
                     },
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
@@ -159,7 +178,19 @@ fun VideoGalleryScreen(
         ) {
             SelectionActionSurface(
                 selectedCount = selectedKeys.size,
-                onClear = { selectedKeys = emptySet() }
+                onClear = { selectedKeys = emptySet() },
+                onShare = {
+                    onShare(videos.filter { it.storageKey in selectedKeys })
+                    selectedKeys = emptySet()
+                },
+                onAddToPlaylist = {
+                    onAddToPlaylist(videos.filter { it.storageKey in selectedKeys })
+                    selectedKeys = emptySet()
+                },
+                onDelete = {
+                    onDelete(videos.filter { it.storageKey in selectedKeys })
+                    selectedKeys = emptySet()
+                }
             )
         }
     }
@@ -241,7 +272,13 @@ private fun ContinueWatchingRow(
 }
 
 @Composable
-private fun SelectionActionSurface(selectedCount: Int, onClear: () -> Unit) {
+private fun SelectionActionSurface(
+    selectedCount: Int,
+    onClear: () -> Unit,
+    onShare: () -> Unit,
+    onAddToPlaylist: () -> Unit,
+    onDelete: () -> Unit
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -256,13 +293,13 @@ private fun SelectionActionSurface(selectedCount: Int, onClear: () -> Unit) {
         }
         Text("已选择 $selectedCount 项", color = GalleryText, fontSize = 13.sp)
         Spacer(Modifier.weight(1f))
-        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
+        IconButton(onClick = onShare, modifier = Modifier.size(40.dp).testTag("selection-share")) {
             Icon(Icons.Default.Share, contentDescription = "分享", tint = GalleryTextMuted)
         }
-        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
+        IconButton(onClick = onAddToPlaylist, modifier = Modifier.size(40.dp).testTag("selection-playlist")) {
             Icon(Icons.Default.PlaylistAdd, contentDescription = "加入播放列表", tint = GalleryTextMuted)
         }
-        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
+        IconButton(onClick = onDelete, modifier = Modifier.size(40.dp).testTag("selection-delete")) {
             Icon(Icons.Default.DeleteOutline, contentDescription = "删除", tint = GalleryTextMuted)
         }
     }

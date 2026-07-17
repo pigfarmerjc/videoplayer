@@ -47,11 +47,18 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.media.thumbnail.ThumbnailPriority
+import com.example.videoplayer.media.thumbnail.FastScrollGate
 import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
 import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
 import com.example.videoplayer.media.thumbnail.ThumbnailSize
@@ -89,6 +96,7 @@ internal fun VideoGalleryGrid(
     columnCount: Int,
     selectedKeys: Set<String>,
     progress: Map<String, Float>,
+    aspectMode: GalleryAspectMode,
     state: LazyGridState,
     onColumnsChange: (Int) -> Unit,
     onVideoClick: (MediaItem) -> Unit,
@@ -103,40 +111,18 @@ internal fun VideoGalleryGrid(
             }
         }
     }
+    val entrySectionIndices = remember(sections) {
+        buildTimelineSectionIndexMap(sections.map { it.items.size })
+    }
     val activeSection by remember(entries, state) {
         androidx.compose.runtime.derivedStateOf {
-            entries.take(state.firstVisibleItemIndex + 1)
-                .filterIsInstance<TimelineEntry.Header>()
-                .lastOrNull()
-                ?.section
-                ?: sections.firstOrNull()
+            val entryIndex = state.firstVisibleItemIndex.coerceIn(0, entrySectionIndices.lastIndex.coerceAtLeast(0))
+            sections.getOrNull(entrySectionIndices.getOrElse(entryIndex) { 0 })
         }
     }
     var presentationScale by remember { mutableFloatStateOf(1f) }
     var previewColumns by remember(columnCount) { mutableFloatStateOf(columnCount.toFloat()) }
-    val scrollController = remember {
-        ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
-    }
-
-    DisposableEffect(scrollController) {
-        onDispose { scrollController.onScrollInProgressChanged(false) }
-    }
-    LaunchedEffect(state) {
-        var previousPosition = 0
-        var previousTime = System.nanoTime()
-        snapshotFlow {
-            Triple(state.isScrollInProgress, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset)
-        }.collect { (scrolling, index, offset) ->
-            val now = System.nanoTime()
-            val elapsedSeconds = ((now - previousTime).coerceAtLeast(1L)) / 1_000_000_000f
-            val position = index * 1_000 + offset
-            val velocity = abs(position - previousPosition) / elapsedSeconds
-            val fastScrolling = scrolling && (velocity > 800f || state.isScrollInProgress)
-            scrollController.onScrollInProgressChanged(fastScrolling)
-            previousPosition = position
-            previousTime = now
-        }
-    }
+    BindThumbnailFastScroll(state)
 
     Box(modifier = modifier.background(GalleryBackground)) {
         LazyVerticalGrid(
@@ -179,6 +165,7 @@ internal fun VideoGalleryGrid(
                         item = entry.item.media,
                         selected = entry.item.id in selectedKeys,
                         progress = progress[entry.item.id] ?: 0f,
+                        aspectMode = aspectMode,
                         onClick = { onVideoClick(entry.item.media) },
                         onLongClick = { onVideoLongClick(entry.item.media) }
                     )
@@ -237,17 +224,24 @@ private fun VideoThumbnailItem(
     item: MediaItem,
     selected: Boolean,
     progress: Float,
+    aspectMode: GalleryAspectMode,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(1f)
+            .aspectRatio(item.galleryAspectRatio(aspectMode))
             .clip(RoundedCornerShape(2.dp))
             .background(GallerySurface)
             .pointerInput(item.resourceVersionKey, selected) {
                 detectTapGestures(onLongPress = { onLongClick() }, onTap = { onClick() })
+            }
+            .semantics {
+                role = Role.Button
+                this.selected = selected
+                onClick("打开视频") { onClick(); true }
+                onLongClick("选择视频") { onLongClick(); true }
             }
             .testTag("video-item:${item.storageKey}")
     ) {
@@ -291,14 +285,15 @@ private fun VideoThumbnailItem(
 internal fun GalleryThumbnail(item: MediaItem, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     var bitmap by remember(item.resourceVersionKey) { mutableStateOf<Bitmap?>(null) }
-    var thumbnailSize by remember { mutableStateOf(ThumbnailSize(360, 360)) }
+    var thumbnailSize by remember { mutableStateOf<ThumbnailSize?>(null) }
 
     LaunchedEffect(item.resourceVersionKey, thumbnailSize) {
+        val requestedSize = thumbnailSize ?: return@LaunchedEffect
         bitmap = null
         ThumbnailSchedulerProvider.request(
             context = context,
             item = item,
-            size = thumbnailSize,
+            size = requestedSize,
             priority = ThumbnailPriority.VISIBLE
         ).collectLatest { bitmap = it.value }
     }
@@ -319,6 +314,32 @@ internal fun GalleryThumbnail(item: MediaItem, modifier: Modifier = Modifier) {
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
+        }
+    }
+}
+
+@Composable
+internal fun BindThumbnailFastScroll(state: LazyGridState) {
+    val scrollController = remember {
+        ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
+    }
+    val gate = remember { FastScrollGate() }
+    DisposableEffect(scrollController) {
+        onDispose { scrollController.onScrollInProgressChanged(false) }
+    }
+    LaunchedEffect(state) {
+        var previousPosition = 0
+        var previousTime = System.nanoTime()
+        snapshotFlow {
+            Triple(state.isScrollInProgress, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset)
+        }.collect { (scrolling, index, offset) ->
+            val now = System.nanoTime()
+            val elapsedSeconds = ((now - previousTime).coerceAtLeast(1L)) / 1_000_000_000f
+            val position = index * 1_000 + offset
+            val velocity = abs(position - previousPosition) / elapsedSeconds
+            scrollController.onScrollInProgressChanged(gate.update(scrolling, velocity))
+            previousPosition = position
+            previousTime = now
         }
     }
 }
@@ -352,6 +373,14 @@ private fun Modifier.galleryPinch(
 
 internal val MediaItem.resourceVersionKey: String
     get() = "$storageKey|$uri|$dateModified"
+
+internal fun MediaItem.galleryAspectRatio(mode: GalleryAspectMode): Float {
+    if (mode == GalleryAspectMode.SQUARE) return 1f
+    val parts = resolution.lowercase().split('x', '×')
+    val width = parts.getOrNull(0)?.trim()?.toFloatOrNull() ?: return 16f / 9f
+    val height = parts.getOrNull(1)?.trim()?.toFloatOrNull() ?: return 16f / 9f
+    return (width / height).coerceIn(0.5f, 2f)
+}
 
 internal fun sectionTitle(section: VideoSection<GalleryVideo>): String = when (val key = section.key) {
     VideoSectionKey.Today -> "今天"

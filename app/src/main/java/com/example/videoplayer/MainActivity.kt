@@ -109,6 +109,7 @@ class MainActivity : ComponentActivity() {
                     // Stateful list of media files loaded in-memory to share across players
                     val mediaItemsState = remember { mutableStateOf<List<MediaItem>>(emptyList()) }
                     val mainSelectedTab = rememberSaveable { mutableIntStateOf(0) }
+                    val playerReturnGeneration = rememberSaveable { mutableIntStateOf(0) }
 
                     // iOS slide-transition configurations
                     val slideTween = tween<IntOffset>(durationMillis = 350)
@@ -151,6 +152,7 @@ class MainActivity : ComponentActivity() {
                                 onNavigateToSettings = {
                                     navController.navigate("settings")
                                 },
+                                playerReturnGeneration = playerReturnGeneration.intValue,
                                 onMediaItemsLoaded = { mediaItemsState.value = it }
                             )
                         }
@@ -207,7 +209,6 @@ class MainActivity : ComponentActivity() {
                                     activeVideoItemId = itemId
                                     activeVideoFolderName = fName
                                 },
-                                onNavigateToAudio = { _, _ -> },
                                 onNavigateToPhoto = { itemId, fName ->
                                     navController.navigate("photo/$itemId/${Uri.encode(fName)}")
                                 }
@@ -259,6 +260,7 @@ class MainActivity : ComponentActivity() {
                             onBackClick = {
                                 activeVideoItemId = null
                                 activeVideoFolderName = null
+                                playerReturnGeneration.intValue++
                             }
                         )
                     }
