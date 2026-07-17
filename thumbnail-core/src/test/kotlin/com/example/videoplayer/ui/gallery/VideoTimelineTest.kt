@@ -147,6 +147,48 @@ class VideoTimelineTest {
         assertEquals("original", store.value)
     }
 
+    @Test
+    fun permissionRecoveryDistinguishesFirstRequestFromPermanentDenial() {
+        assertEquals(
+            PermissionRecoveryAction.REQUEST,
+            resolvePermissionRecoveryAction(
+                granted = false,
+                requestedOnce = false,
+                shouldShowRationale = false
+            )
+        )
+        assertEquals(
+            PermissionRecoveryAction.REQUEST,
+            resolvePermissionRecoveryAction(
+                granted = false,
+                requestedOnce = true,
+                shouldShowRationale = true
+            )
+        )
+        assertEquals(
+            PermissionRecoveryAction.OPEN_SETTINGS,
+            resolvePermissionRecoveryAction(
+                granted = false,
+                requestedOnce = true,
+                shouldShowRationale = false
+            )
+        )
+        assertEquals(
+            PermissionRecoveryAction.NONE,
+            resolvePermissionRecoveryAction(
+                granted = true,
+                requestedOnce = true,
+                shouldShowRationale = false
+            )
+        )
+    }
+
+    @Test
+    fun legacyDeleteResultReportsSuccessAndFailureCounts() {
+        assertEquals("已删除 2 个，1 个失败", GalleryDeleteResult(2, 1).message)
+        assertEquals("删除失败，0 个成功，3 个失败", GalleryDeleteResult(0, 3).message)
+    }
+
     private fun video(id: String, year: Int, month: Int, day: Int, hour: Int, minute: Int) =
         TimelineVideo(id, instant(year, month, day, hour, minute).epochSecond)
 

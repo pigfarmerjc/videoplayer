@@ -376,6 +376,13 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
         prefs.edit().putString("gallery_aspect_mode", value).apply()
     }
 
+    fun wasPhotoPermissionRequestedOnce(): Boolean =
+        prefs.getBoolean("photo_permission_requested_once", false)
+
+    fun setPhotoPermissionRequestedOnce() {
+        prefs.edit().putBoolean("photo_permission_requested_once", true).apply()
+    }
+
     // 视频网格尺寸：140 = 小，220 = 中，320 = 大
     fun getVideoGridSize(): Int = prefs.getInt("video_grid_size", 220).let {
         if (it in setOf(140, 220, 320)) it else 220

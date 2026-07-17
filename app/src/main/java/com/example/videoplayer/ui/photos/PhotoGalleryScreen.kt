@@ -63,7 +63,7 @@ fun PhotoGalleryScreen(
     onRetry: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    BindThumbnailFastScroll(state)
+    BindThumbnailFastScroll(state, columns = 3)
 
     Box(
         modifier = modifier

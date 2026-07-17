@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.media.thumbnail.ThumbnailPriority
 import com.example.videoplayer.media.thumbnail.FastScrollGate
+import com.example.videoplayer.media.thumbnail.GridScrollVelocityTracker
 import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
 import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
 import com.example.videoplayer.media.thumbnail.ThumbnailSize
@@ -122,7 +123,7 @@ internal fun VideoGalleryGrid(
     }
     var presentationScale by remember { mutableFloatStateOf(1f) }
     var previewColumns by remember(columnCount) { mutableFloatStateOf(columnCount.toFloat()) }
-    BindThumbnailFastScroll(state)
+    BindThumbnailFastScroll(state, columnCount)
 
     Box(modifier = modifier.background(GalleryBackground)) {
         LazyVerticalGrid(
@@ -319,28 +320,64 @@ internal fun GalleryThumbnail(item: MediaItem, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun BindThumbnailFastScroll(state: LazyGridState) {
+internal fun BindThumbnailFastScroll(state: LazyGridState, columns: Int) {
     val scrollController = remember {
         ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
     }
     val gate = remember { FastScrollGate() }
+    val velocityTracker = remember { GridScrollVelocityTracker() }
     DisposableEffect(scrollController) {
         onDispose { scrollController.onScrollInProgressChanged(false) }
     }
     LaunchedEffect(state) {
-        var previousPosition = 0
         var previousTime = System.nanoTime()
         snapshotFlow {
-            Triple(state.isScrollInProgress, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset)
-        }.collect { (scrolling, index, offset) ->
+            val layoutInfo = state.layoutInfo
+            GridScrollSample(
+                scrolling = state.isScrollInProgress,
+                firstVisibleItemIndex = state.firstVisibleItemIndex,
+                firstVisibleItemScrollOffset = state.firstVisibleItemScrollOffset,
+                columns = columns.coerceAtLeast(1),
+                averageLineSizePx = layoutInfo.visibleItemsInfo.averageGridLineSizePx()
+            )
+        }.collect { sample ->
             val now = System.nanoTime()
             val elapsedSeconds = ((now - previousTime).coerceAtLeast(1L)) / 1_000_000_000f
-            val position = index * 1_000 + offset
-            val velocity = abs(position - previousPosition) / elapsedSeconds
-            scrollController.onScrollInProgressChanged(gate.update(scrolling, velocity))
-            previousPosition = position
+            val velocity = if (sample.scrolling) {
+                velocityTracker.update(
+                    firstVisibleItemIndex = sample.firstVisibleItemIndex,
+                    firstVisibleItemScrollOffset = sample.firstVisibleItemScrollOffset,
+                    columns = sample.columns,
+                    averageLineSizePx = sample.averageLineSizePx,
+                    elapsedSeconds = elapsedSeconds
+                )
+            } else {
+                velocityTracker.reset()
+                0f
+            }
+            scrollController.onScrollInProgressChanged(gate.update(sample.scrolling, velocity))
             previousTime = now
         }
+    }
+}
+
+private data class GridScrollSample(
+    val scrolling: Boolean,
+    val firstVisibleItemIndex: Int,
+    val firstVisibleItemScrollOffset: Int,
+    val columns: Int,
+    val averageLineSizePx: Float
+)
+
+private fun List<androidx.compose.foundation.lazy.grid.LazyGridItemInfo>.averageGridLineSizePx(): Float {
+    if (isEmpty()) return 0f
+    val rowOffsets = map { it.offset.y }.distinct().sorted()
+    val lineDistances = rowOffsets.zipWithNext { first, second -> second - first }
+        .filter { it > 0 }
+    return if (lineDistances.isNotEmpty()) {
+        lineDistances.average().toFloat()
+    } else {
+        maxOf { it.size.height }.toFloat()
     }
 }
 

@@ -6,7 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +31,7 @@ import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -50,7 +51,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -81,7 +81,9 @@ fun VideoGalleryScreen(
     onNavigateToVideo: (Long, String) -> Unit,
     onShare: (List<MediaItem>) -> Unit,
     onAddToPlaylist: (List<MediaItem>) -> Unit,
-    onDelete: (List<MediaItem>) -> Unit,
+    onDelete: (List<MediaItem>, () -> Unit) -> Unit,
+    queryError: String? = null,
+    onRetryQuery: () -> Unit = {},
     gridState: LazyGridState = rememberLazyGridState(),
     modifier: Modifier = Modifier
 ) {
@@ -122,7 +124,9 @@ fun VideoGalleryScreen(
             .semantics { testTagsAsResourceId = true }
             .testTag("video-gallery")
     ) {
-        Column(Modifier.fillMaxSize()) {
+        if (queryError != null) {
+            VideoQueryError(queryError, onRetryQuery)
+        } else Column(Modifier.fillMaxSize()) {
             if (continueWatching.isNotEmpty()) {
                 ContinueWatchingRow(
                     items = continueWatching,
@@ -169,7 +173,7 @@ fun VideoGalleryScreen(
         }
 
         AnimatedVisibility(
-            visible = selectedKeys.isNotEmpty(),
+            visible = queryError == null && selectedKeys.isNotEmpty(),
             enter = fadeIn() + slideInVertically { it / 2 },
             exit = fadeOut() + slideOutVertically { it / 2 },
             modifier = Modifier
@@ -188,8 +192,9 @@ fun VideoGalleryScreen(
                     selectedKeys = emptySet()
                 },
                 onDelete = {
-                    onDelete(videos.filter { it.storageKey in selectedKeys })
-                    selectedKeys = emptySet()
+                    onDelete(videos.filter { it.storageKey in selectedKeys }) {
+                        selectedKeys = emptySet()
+                    }
                 }
             )
         }
@@ -224,14 +229,8 @@ private fun ContinueWatchingRow(
                         .width(156.dp)
                         .clip(RoundedCornerShape(5.dp))
                         .background(GalleryRaisedSurface)
-                        .semantics { role = Role.Button }
-                        .then(
-                            Modifier.pointerInput(entry.video.id) {
-                                detectTapGestures {
-                                    onVideoClick(entry.video.media)
-                                }
-                            }
-                        )
+                        .clickable(role = Role.Button) { onVideoClick(entry.video.media) }
+                        .testTag("continue-item:${entry.video.media.storageKey}")
                 ) {
                     Box(
                         Modifier
@@ -268,6 +267,26 @@ private fun ContinueWatchingRow(
             }
         }
         Spacer(Modifier.height(6.dp))
+    }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.VideoQueryError(
+    message: String,
+    onRetry: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .align(Alignment.Center)
+            .padding(28.dp)
+            .testTag("video-query-error")
+    ) {
+        Text("视频读取失败：$message", color = GalleryTextMuted)
+        Spacer(Modifier.height(14.dp))
+        Button(onClick = onRetry, modifier = Modifier.testTag("retry-video-query")) {
+            Text("重试")
+        }
     }
 }
 

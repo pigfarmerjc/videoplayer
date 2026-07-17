@@ -35,9 +35,15 @@ class VideoGalleryUiTest {
 
     @Test
     fun continueWatchingOnlyAppearsForUnfinishedVideo() {
-        setGalleryContent(progress = mapOf(video.storageKey to 0.42f))
+        var openedVideoId: Long? = null
+        setGalleryContent(
+            progress = mapOf(video.storageKey to 0.42f),
+            onNavigateToVideo = { id, _ -> openedVideoId = id }
+        )
 
         composeRule.onNodeWithTag("continue-watching").assertIsDisplayed()
+        composeRule.onNodeWithTag("continue-item:${video.storageKey}").performClick()
+        composeRule.runOnIdle { assert(openedVideoId == video.id) }
     }
 
     @Test
@@ -97,12 +103,55 @@ class VideoGalleryUiTest {
         composeRule.runOnIdle { assert(requestedMode == GalleryAspectMode.ORIGINAL) }
     }
 
+    @Test
+    fun videoScanFailureShowsRetryInsteadOfAnEmptyGallery() {
+        var retried = false
+        setGalleryContent(
+            videoQueryError = "媒体库暂时不可用",
+            onRetryVideoQuery = { retried = true }
+        )
+
+        composeRule.onNodeWithTag("video-query-error").assertIsDisplayed()
+        composeRule.onNodeWithTag("retry-video-query").performClick()
+        composeRule.runOnIdle { assert(retried) }
+    }
+
+    @Test
+    fun photoPartialFailureDoesNotReplaceTheVideoGallery() {
+        setGalleryContent(
+            photoAccessState = PhotoAccessState.QueryFailed("图片读取失败")
+        )
+
+        composeRule.onNodeWithTag("video-gallery").assertIsDisplayed()
+        composeRule.onNodeWithTag("destination-photos").performClick()
+        composeRule.onNodeWithTag("photo-query-error").assertIsDisplayed()
+    }
+
+    @Test
+    fun deleteSelectionClearsOnlyAfterDeletionIsConfirmed() {
+        var confirmDeletion: (() -> Unit)? = null
+        setGalleryContent(
+            onDelete = { _, onConfirmed -> confirmDeletion = onConfirmed }
+        )
+        composeRule.onNodeWithTag("video-item:${video.storageKey}")
+            .performTouchInput { longClick() }
+
+        composeRule.onNodeWithTag("selection-delete").performClick()
+        composeRule.onNodeWithTag("selection-actions").assertIsDisplayed()
+        composeRule.runOnIdle { requireNotNull(confirmDeletion).invoke() }
+        composeRule.onNodeWithTag("selection-actions").assertDoesNotExist()
+    }
+
     private fun setGalleryContent(
         progress: Map<String, Float> = emptyMap(),
         onAddToPlaylist: (List<MediaItem>) -> Unit = {},
         photoAccessState: PhotoAccessState = PhotoAccessState.Available,
         onRequestPhotoPermission: () -> Unit = {},
-        onAspectModeChange: (GalleryAspectMode) -> Unit = {}
+        onAspectModeChange: (GalleryAspectMode) -> Unit = {},
+        videoQueryError: String? = null,
+        onRetryVideoQuery: () -> Unit = {},
+        onDelete: (List<MediaItem>, () -> Unit) -> Unit = { _, _ -> },
+        onNavigateToVideo: (Long, String) -> Unit = { _, _ -> }
     ) {
         composeRule.setContent {
             VideoPlayerTheme {
@@ -112,7 +161,7 @@ class VideoGalleryUiTest {
                     playbackProgress = progress,
                     initialColumns = 4,
                     onColumnsChange = {},
-                    onNavigateToVideo = { _, _ -> },
+                    onNavigateToVideo = onNavigateToVideo,
                     onNavigateToPhoto = { _, _ -> },
                     onNavigateToLibrary = {},
                     onRefresh = {},
@@ -120,7 +169,10 @@ class VideoGalleryUiTest {
                     photoAccessState = photoAccessState,
                     onRequestPhotoPermission = onRequestPhotoPermission,
                     aspectMode = GalleryAspectMode.SQUARE,
-                    onAspectModeChange = onAspectModeChange
+                    onAspectModeChange = onAspectModeChange,
+                    videoQueryError = videoQueryError,
+                    onRetryVideoQuery = onRetryVideoQuery,
+                    onDelete = onDelete
                 )
             }
         }

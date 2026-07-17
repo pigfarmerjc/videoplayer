@@ -46,6 +46,8 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -82,7 +84,10 @@ import com.example.videoplayer.ui.gallery.VideoGalleryScreen
 import com.example.videoplayer.ui.gallery.GalleryColumnStore
 import com.example.videoplayer.ui.gallery.GalleryAspectMode
 import com.example.videoplayer.ui.gallery.GalleryAspectStore
+import com.example.videoplayer.ui.gallery.GalleryDeleteResult
+import com.example.videoplayer.ui.gallery.PermissionRecoveryAction
 import com.example.videoplayer.ui.gallery.readGalleryAspectMode
+import com.example.videoplayer.ui.gallery.resolvePermissionRecoveryAction
 import com.example.videoplayer.ui.gallery.writeGalleryAspectMode
 import com.example.videoplayer.ui.gallery.readClampedColumnCount
 import com.example.videoplayer.ui.photos.PhotoGalleryScreen
@@ -123,13 +128,24 @@ fun MainScreen(
     val libraryState by store.state.collectAsState()
     var hasVideoPermission by remember { mutableStateOf(hasVideoPermission(context)) }
     var hasPhotoPermission by remember { mutableStateOf(hasPhotoPermission(context)) }
+    var photoPermissionRequestedOnce by remember {
+        mutableStateOf(repository.wasPhotoPermissionRequestedOnce())
+    }
     var photoAccessState by remember {
         mutableStateOf<PhotoAccessState>(
             if (hasPhotoPermission) PhotoAccessState.Available
-            else PhotoAccessState.NeedsPermission(canRequest = true)
+            else PhotoAccessState.NeedsPermission(
+                canRequest = resolvePermissionRecoveryAction(
+                    granted = false,
+                    requestedOnce = photoPermissionRequestedOnce,
+                    shouldShowRationale = activity.shouldShowRequestPermissionRationale(photoPermission())
+                ) == PermissionRecoveryAction.REQUEST
+            )
         )
     }
     var pendingDeleteItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var pendingDeleteCompletion by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
 
     fun refreshLibrary() {
         scope.launch { store.refresh(force = true) }
@@ -140,10 +156,16 @@ fun MainScreen(
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             refreshLibrary()
+            pendingDeleteCompletion?.invoke()
+            val deletedCount = pendingDeleteItems.size
+            scope.launch {
+                snackbarHostState.showSnackbar(GalleryDeleteResult(deletedCount, 0).message)
+            }
         } else if (pendingDeleteItems.isNotEmpty()) {
-            Toast.makeText(context, "未删除所选视频", Toast.LENGTH_SHORT).show()
+            scope.launch { snackbarHostState.showSnackbar("已取消删除，已保留所选视频") }
         }
         pendingDeleteItems = emptyList()
+        pendingDeleteCompletion = null
     }
 
     val videoPermissionLauncher = rememberLauncherForActivityResult(
@@ -166,18 +188,36 @@ fun MainScreen(
         if (granted) refreshLibrary()
     }
 
+    fun requestPhotoPermission() {
+        photoPermissionRequestedOnce = true
+        repository.setPhotoPermissionRequestedOnce()
+        photoAccessState = PhotoAccessState.Requesting
+        photoPermissionLauncher.launch(photoPermission())
+    }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val videoGranted = hasVideoPermission(context)
                 val photoGranted = hasPhotoPermission(context)
-                if (videoGranted && !hasVideoPermission) {
-                    hasVideoPermission = true
-                    refreshLibrary()
+                val permissionsChanged = videoGranted != hasVideoPermission ||
+                    photoGranted != hasPhotoPermission
+                hasVideoPermission = videoGranted
+                hasPhotoPermission = photoGranted
+                photoAccessState = if (photoGranted) {
+                    PhotoAccessState.Available
+                } else {
+                    PhotoAccessState.NeedsPermission(
+                        canRequest = resolvePermissionRecoveryAction(
+                            granted = false,
+                            requestedOnce = photoPermissionRequestedOnce,
+                            shouldShowRationale = activity.shouldShowRequestPermissionRationale(
+                                photoPermission()
+                            )
+                        ) == PermissionRecoveryAction.REQUEST
+                    )
                 }
-                if (photoGranted && !hasPhotoPermission) {
-                    hasPhotoPermission = true
-                    photoAccessState = PhotoAccessState.Available
+                if (permissionsChanged) {
                     refreshLibrary()
                 }
             }
@@ -194,11 +234,13 @@ fun MainScreen(
         }
     }
 
-    val videos = remember(libraryState.generation, libraryState.videos) {
-        libraryState.videos.map { it.toMediaItem(MediaType.VIDEO) }
+    val videos = remember(libraryState.generation, libraryState.videos, hasVideoPermission) {
+        if (hasVideoPermission) libraryState.videos.map { it.toMediaItem(MediaType.VIDEO) }
+        else emptyList()
     }
-    val photos = remember(libraryState.generation, libraryState.photos) {
-        libraryState.photos.map { it.toMediaItem(MediaType.PHOTO) }
+    val photos = remember(libraryState.generation, libraryState.photos, hasPhotoPermission) {
+        if (hasPhotoPermission) libraryState.photos.map { it.toMediaItem(MediaType.PHOTO) }
+        else emptyList()
     }
     var playbackProgress by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
     LaunchedEffect(videos, playerReturnGeneration) {
@@ -227,10 +269,24 @@ fun MainScreen(
 
     LaunchedEffect(hasPhotoPermission, libraryState.error) {
         if (hasPhotoPermission) {
-            val photoError = (libraryState.error as? LibraryError.PartialQueryFailure)?.photo
+            val photoError = when (val error = libraryState.error) {
+                is LibraryError.ScanFailure -> error.cause
+                is LibraryError.PartialQueryFailure -> error.photo
+                null -> null
+            }
             photoAccessState = if (photoError == null) PhotoAccessState.Available
-            else PhotoAccessState.QueryFailed(photoError.message ?: "未知错误")
+            else PhotoAccessState.QueryFailed(photoError.readableMessage())
         }
+    }
+
+    val videoQueryError = if (hasVideoPermission) {
+        when (val error = libraryState.error) {
+            is LibraryError.ScanFailure -> error.cause
+            is LibraryError.PartialQueryFailure -> error.video
+            null -> null
+        }?.readableMessage()
+    } else {
+        null
     }
 
     if (!hasVideoPermission) {
@@ -261,8 +317,12 @@ fun MainScreen(
         onDestinationChange = { destination ->
             onSelectedTabChange(destination.ordinal)
             if (destination == GalleryDestination.PHOTOS && !hasPhotoPermission) {
-                photoAccessState = PhotoAccessState.Requesting
-                photoPermissionLauncher.launch(photoPermission())
+                val recoveryAction = resolvePermissionRecoveryAction(
+                    granted = false,
+                    requestedOnce = photoPermissionRequestedOnce,
+                    shouldShowRationale = activity.shouldShowRequestPermissionRationale(photoPermission())
+                )
+                if (recoveryAction == PermissionRecoveryAction.REQUEST) requestPhotoPermission()
             }
         },
         onOpenLibrarySection = onNavigateToFolder,
@@ -274,10 +334,7 @@ fun MainScreen(
             aspectStore.writeGalleryAspectMode(mode)
         },
         photoAccessState = photoAccessState,
-        onRequestPhotoPermission = {
-            photoAccessState = PhotoAccessState.Requesting
-            photoPermissionLauncher.launch(photoPermission())
-        },
+        onRequestPhotoPermission = ::requestPhotoPermission,
         onOpenPhotoSettings = {
             context.startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -286,15 +343,19 @@ fun MainScreen(
             )
         },
         onRetryPhotoQuery = ::refreshLibrary,
+        videoQueryError = videoQueryError,
+        onRetryVideoQuery = ::refreshLibrary,
+        snackbarHostState = snackbarHostState,
         onShare = { items -> shareVideos(context, items) },
         onAddToPlaylist = { items ->
             items.forEach { repository.setInPlaylist(it, true) }
             Toast.makeText(context, "已加入播放列表", Toast.LENGTH_SHORT).show()
         },
-        onDelete = { items ->
+        onDelete = { items, onConfirmed ->
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {
                     pendingDeleteItems = items
+                    pendingDeleteCompletion = onConfirmed
                     val request = MediaStore.createDeleteRequest(
                         context.contentResolver,
                         items.map { it.uri }
@@ -302,7 +363,10 @@ fun MainScreen(
                     deleteRequestLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
                 } catch (error: Exception) {
                     pendingDeleteItems = emptyList()
-                    Toast.makeText(context, "无法请求删除：${error.message ?: "未知错误"}", Toast.LENGTH_LONG).show()
+                    pendingDeleteCompletion = null
+                    scope.launch {
+                        snackbarHostState.showSnackbar("无法请求删除：${error.readableMessage()}")
+                    }
                 }
             } else {
                 scope.launch(Dispatchers.IO) {
@@ -311,8 +375,16 @@ fun MainScreen(
                             .getOrDefault(false)
                     }
                     withContext(Dispatchers.Main) {
-                        if (deleted > 0) refreshLibrary()
-                        else Toast.makeText(context, "未能删除所选视频", Toast.LENGTH_LONG).show()
+                        if (deleted > 0) {
+                            onConfirmed()
+                            refreshLibrary()
+                        }
+                        snackbarHostState.showSnackbar(
+                            GalleryDeleteResult(
+                                successCount = deleted,
+                                failureCount = items.size - deleted
+                            ).message
+                        )
                     }
                 }
             }
@@ -343,9 +415,12 @@ fun MainGalleryContent(
     onRequestPhotoPermission: () -> Unit = {},
     onOpenPhotoSettings: () -> Unit = {},
     onRetryPhotoQuery: () -> Unit = {},
+    videoQueryError: String? = null,
+    onRetryVideoQuery: () -> Unit = {},
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
     onShare: (List<MediaItem>) -> Unit = {},
     onAddToPlaylist: (List<MediaItem>) -> Unit = {},
-    onDelete: (List<MediaItem>) -> Unit = {}
+    onDelete: (List<MediaItem>, () -> Unit) -> Unit = { _, _ -> }
 ) {
     var destination by rememberSaveable { mutableStateOf(initialDestination) }
     val videoGridState = rememberLazyGridState()
@@ -353,6 +428,7 @@ fun MainGalleryContent(
 
     Scaffold(
         containerColor = GalleryBackground,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             GalleryTopBar(
                 destination = destination,
@@ -385,6 +461,8 @@ fun MainGalleryContent(
                 onShare = onShare,
                 onAddToPlaylist = onAddToPlaylist,
                 onDelete = onDelete,
+                queryError = videoQueryError,
+                onRetryQuery = onRetryVideoQuery,
                 gridState = videoGridState,
                 modifier = Modifier.padding(padding)
             )
@@ -639,6 +717,9 @@ private fun hasVideoPermission(context: android.content.Context): Boolean =
 
 private fun hasPhotoPermission(context: android.content.Context): Boolean =
     ContextCompat.checkSelfPermission(context, photoPermission()) == PackageManager.PERMISSION_GRANTED
+
+private fun Throwable.readableMessage(): String =
+    message?.takeIf { it.isNotBlank() } ?: "未知错误"
 
 private fun shareVideos(context: android.content.Context, items: List<MediaItem>) {
     if (items.isEmpty()) return

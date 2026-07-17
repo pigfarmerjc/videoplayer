@@ -21,6 +21,39 @@ interface GalleryAspectStore {
     fun write(value: String)
 }
 
+enum class PermissionRecoveryAction {
+    NONE,
+    REQUEST,
+    OPEN_SETTINGS
+}
+
+fun resolvePermissionRecoveryAction(
+    granted: Boolean,
+    requestedOnce: Boolean,
+    shouldShowRationale: Boolean
+): PermissionRecoveryAction = when {
+    granted -> PermissionRecoveryAction.NONE
+    shouldShowRationale || !requestedOnce -> PermissionRecoveryAction.REQUEST
+    else -> PermissionRecoveryAction.OPEN_SETTINGS
+}
+
+data class GalleryDeleteResult(
+    val successCount: Int,
+    val failureCount: Int
+) {
+    init {
+        require(successCount >= 0)
+        require(failureCount >= 0)
+    }
+
+    val message: String
+        get() = if (successCount == 0) {
+            "删除失败，0 个成功，$failureCount 个失败"
+        } else {
+            "已删除 $successCount 个，$failureCount 个失败"
+        }
+}
+
 data class ContinueWatchingVideo<T : VideoTimelineItem>(
     val video: T,
     val progress: Float

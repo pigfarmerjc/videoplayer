@@ -213,6 +213,48 @@ class ThumbnailSchedulerTest {
         assertEquals(false, gate.update(isScrollInProgress = false, velocity = 3_000f))
     }
 
+    @Test
+    fun multiColumnSlowScrollAcrossARowDoesNotEnterFastMode() {
+        val tracker = GridScrollVelocityTracker()
+        val gate = FastScrollGate(enterVelocity = 1_800f)
+
+        tracker.update(
+            firstVisibleItemIndex = 0,
+            firstVisibleItemScrollOffset = 190,
+            columns = 4,
+            averageLineSizePx = 200f,
+            elapsedSeconds = 0f
+        )
+        val velocity = tracker.update(
+            firstVisibleItemIndex = 4,
+            firstVisibleItemScrollOffset = 10,
+            columns = 4,
+            averageLineSizePx = 200f,
+            elapsedSeconds = 0.1f
+        )
+
+        assertEquals(200f, velocity, 0.01f)
+        assertEquals(false, gate.update(isScrollInProgress = true, velocity = velocity))
+    }
+
+    @Test
+    fun multiColumnFastFlingEntersFastMode() {
+        val tracker = GridScrollVelocityTracker()
+        val gate = FastScrollGate(enterVelocity = 1_800f)
+
+        tracker.update(0, 0, columns = 4, averageLineSizePx = 200f, elapsedSeconds = 0f)
+        val velocity = tracker.update(
+            firstVisibleItemIndex = 12,
+            firstVisibleItemScrollOffset = 20,
+            columns = 4,
+            averageLineSizePx = 200f,
+            elapsedSeconds = 0.1f
+        )
+
+        assertEquals(6_200f, velocity, 0.01f)
+        assertEquals(true, gate.update(isScrollInProgress = true, velocity = velocity))
+    }
+
     private fun resource(name: String, version: Long) = ThumbnailResourceIdentity(
         storageKey = "file:/$name.mp4",
         uri = "content://media/external/video/$name",
