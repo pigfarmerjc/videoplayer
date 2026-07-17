@@ -25,25 +25,30 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
-import androidx.media3.common.MediaItem as ExoMediaItem
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.media3.common.util.UnstableApi
+import com.example.videoplayer.FloatingPlaybackRequest
 import com.example.videoplayer.FloatingPlayerManager
+import com.example.videoplayer.FloatingWindowState
 import com.example.videoplayer.MainActivity
-import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.repository.MediaRepository
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media as VlcMedia
-import org.videolan.libvlc.MediaPlayer as VlcMediaPlayer
+import com.example.videoplayer.playback.AndroidPlayerEngineFactory
+import com.example.videoplayer.playback.EngineChoice
+import com.example.videoplayer.playback.ExoPlayerEngine
+import com.example.videoplayer.playback.PlaybackController
+import com.example.videoplayer.playback.PlaybackSession
+import com.example.videoplayer.playback.PlayerEngine
+import com.example.videoplayer.playback.VlcPlayerEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import org.videolan.libvlc.util.VLCVideoLayout
-import java.io.File
-import java.util.Locale
 
+@UnstableApi
 class FloatingPlayerService : Service() {
 
     private lateinit var windowManager: WindowManager
@@ -54,12 +59,15 @@ class FloatingPlayerService : Service() {
     private var playPauseButton: ImageButton? = null
     private var titleText: TextView? = null
 
-    // Players
-    private var exoPlayer: ExoPlayer? = null
+    // Playback is owned by the serialized controller; views only render the active adapter.
+    private var playbackController: PlaybackController? = null
+    private var activeEngine: PlayerEngine? = null
+    private var stateCollectionJob: Job? = null
+    private var activeRequest: FloatingPlaybackRequest? = null
+    private var activeSessionId: String? = null
     private var exoPlayerView: PlayerView? = null
-    private var libVlc: LibVLC? = null
-    private var vlcMediaPlayer: VlcMediaPlayer? = null
     private var vlcVideoLayout: VLCVideoLayout? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private lateinit var repository: MediaRepository
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -103,15 +111,6 @@ class FloatingPlayerService : Service() {
         val dm = resources.displayMetrics
         maxWidth = dm.widthPixels
 
-        val currentItem = FloatingPlayerManager.playlist.getOrNull(FloatingPlayerManager.currentIndex)
-        if (currentItem != null) {
-            aspectRatio = getAspectRatio(currentItem.resolution)
-        }
-
-        startForegroundServiceNotification()
-        createFloatingWindow()
-        initializePlayer()
-        startProgressTicker()
     }
 
     private fun startForegroundServiceNotification() {
@@ -179,8 +178,7 @@ class FloatingPlayerService : Service() {
                 lp.width = newWidth
                 lp.height = newHeight
                 safeUpdateLayout(lp)
-                FloatingPlayerManager.width = newWidth
-                FloatingPlayerManager.height = newHeight
+                FloatingPlayerManager.updateWindow { it.copy(width = newWidth, height = newHeight) }
                 return true
             }
 
@@ -208,8 +206,9 @@ class FloatingPlayerService : Service() {
         val maxH = (dm.heightPixels * 0.85f).toInt()
 
         // Calculate initial width and height based on the new aspect ratio
-        var initW = FloatingPlayerManager.width
-        var initH = FloatingPlayerManager.height
+        val savedWindow = FloatingPlayerManager.windowState
+        var initW = savedWindow.width
+        var initH = savedWindow.height
 
         val currentRatio = if (initH > 0) initW.toFloat() / initH.toFloat() else 0f
         // If stored size ratio differs from the video aspect ratio significantly (e.g. landscape vs portrait)
@@ -237,8 +236,8 @@ class FloatingPlayerService : Service() {
             initW = minWidth
             initH = (initW / aspectRatio).toInt()
         }
-        val initX = FloatingPlayerManager.x.coerceIn(0, (dm.widthPixels - initW).coerceAtLeast(0))
-        val initY = FloatingPlayerManager.y.coerceIn(0, (dm.heightPixels - initH).coerceAtLeast(0))
+        val initX = savedWindow.x.coerceIn(0, (dm.widthPixels - initW).coerceAtLeast(0))
+        val initY = savedWindow.y.coerceIn(0, (dm.heightPixels - initH).coerceAtLeast(0))
 
         windowParams = WindowManager.LayoutParams(
             initW,
@@ -339,8 +338,7 @@ class FloatingPlayerService : Service() {
                     lp.width = newW
                     lp.height = newH
                     safeUpdateLayout(lp)
-                    FloatingPlayerManager.width = newW
-                    FloatingPlayerManager.height = newH
+                    FloatingPlayerManager.updateWindow { it.copy(width = newW, height = newH) }
                 } else if (isDragging) {
                     val dm = resources.displayMetrics
                     val maxX = dm.widthPixels - lp.width
@@ -348,8 +346,7 @@ class FloatingPlayerService : Service() {
                     lp.x = (touchDownWindowX + dx).coerceIn(0, maxX.coerceAtLeast(0))
                     lp.y = (touchDownWindowY + dy).coerceIn(0, maxY.coerceAtLeast(0))
                     safeUpdateLayout(lp)
-                    FloatingPlayerManager.x = lp.x
-                    FloatingPlayerManager.y = lp.y
+                    FloatingPlayerManager.updateWindow { it.copy(x = lp.x, y = lp.y) }
                 }
                 true
             }

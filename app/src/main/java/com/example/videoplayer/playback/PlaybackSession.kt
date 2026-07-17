@@ -34,6 +34,13 @@ data class PlaybackState(
     val speed: Float = 1f,
     val selectedAudioTrackId: String? = null,
     val selectedSubtitleTrackId: String? = null,
+    val isReady: Boolean = false,
+    val durationMs: Long = 0L,
+    val videoWidth: Int = 0,
+    val videoHeight: Int = 0,
+    val audioTracks: List<PlayerTrack> = emptyList(),
+    val subtitleTracks: List<PlayerTrack> = emptyList(),
+    val endedEventId: Long = 0L,
     val hasUsableEngine: Boolean = false,
     val isReleased: Boolean = false,
     val error: Throwable? = null

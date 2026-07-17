@@ -71,6 +71,15 @@ class PlaybackController(
         submit { Command.SelectAudioTrack(trackId, it) }
     }
 
+    suspend fun selectSubtitleTrack(trackId: String?) {
+        submit { Command.SelectSubtitleTrack(trackId, it) }
+    }
+
+    suspend fun setPlaybackSpeed(speed: Float) {
+        require(speed.isFinite() && speed > 0f) { "Playback speed must be positive and finite" }
+        submit { Command.SetPlaybackSpeed(speed, it) }
+    }
+
     suspend fun switchEngine(choice: EngineChoice) {
         submit { Command.SwitchEngine(choice, it) }
     }
@@ -106,6 +115,7 @@ class PlaybackController(
         var generation = 0L
         var currentSession: PlaybackSession? = null
         var preferredChoice = preferredInitialChoice
+        var endedEventId = 0L
 
         fun stateFor(
             session: PlaybackSession?,
@@ -123,6 +133,7 @@ class PlaybackController(
             selectedAudioTrackId = session?.selectedAudioTrackId,
             selectedSubtitleTrackId = session?.selectedSubtitleTrackId,
             hasUsableEngine = usable,
+            endedEventId = endedEventId,
             error = error
         )
 
@@ -154,7 +165,7 @@ class PlaybackController(
             }
         }
 
-        suspend fun cleanupAfterRestoreFailure(restoreError: Throwable) {
+        suspend fun cleanupAfterRestoreFailure(restoreError: Throwable, rethrow: Boolean = true) {
             val engine = checkNotNull(activeEngine)
             hasUsableEngine = false
             acceptedGeneration = null
@@ -167,17 +178,19 @@ class PlaybackController(
                 restoreError.addSuppressed(releaseError)
                 publish(restoreError)
             }
-            throw restoreError
+            if (rethrow) throw restoreError
         }
 
         suspend fun activate(choice: EngineChoice, session: PlaybackSession) {
+            var requestedChoice = choice
+            while (true) {
             check(activeEngine == null) { "Cannot activate a second player engine" }
             generation++
             currentSession = session
             acceptedGeneration = null
             hasUsableEngine = false
             val engine = try {
-                engineFactory.create(choice)
+                engineFactory.create(requestedChoice)
             } catch (createError: Throwable) {
                 publish(createError)
                 throw createError
@@ -190,8 +203,16 @@ class PlaybackController(
                 hasUsableEngine = true
                 acceptedGeneration = generation
                 publish()
+            } catch (fallback: EngineFallbackRequiredException) {
+                cleanupAfterRestoreFailure(fallback, rethrow = false)
+                if (fallback.fallbackChoice == requestedChoice) throw fallback
+                preferredChoice = fallback.fallbackChoice
+                requestedChoice = fallback.fallbackChoice
+                continue
             } catch (restoreError: Throwable) {
                 cleanupAfterRestoreFailure(restoreError)
+            }
+            return
             }
         }
 
@@ -279,6 +300,28 @@ class PlaybackController(
                         command.completion.complete(Unit)
                     }
 
+                    is Command.SelectSubtitleTrack -> {
+                        requireUsableEngine().selectSubtitleTrack(command.trackId)
+                        currentSession = currentSession?.copy(selectedSubtitleTrackId = command.trackId)
+                        _state.value = _state.value.copy(
+                            session = currentSession,
+                            selectedSubtitleTrackId = command.trackId,
+                            error = null
+                        )
+                        command.completion.complete(Unit)
+                    }
+
+                    is Command.SetPlaybackSpeed -> {
+                        requireUsableEngine().setPlaybackSpeed(command.speed)
+                        currentSession = currentSession?.copy(speed = command.speed)
+                        _state.value = _state.value.copy(
+                            session = currentSession,
+                            speed = command.speed,
+                            error = null
+                        )
+                        command.completion.complete(Unit)
+                    }
+
                     is Command.SwitchEngine -> {
                         val engine = activeEngine
                         val session = currentSession
@@ -323,6 +366,74 @@ class PlaybackController(
                     is Command.EngineCallback -> {
                         if (hasUsableEngine && command.generation == acceptedGeneration) {
                             when (val event = command.event) {
+                                is EngineEvent.Ready -> {
+                                    _state.value = _state.value.copy(
+                                        isReady = true,
+                                        durationMs = event.durationMs.coerceAtLeast(0L)
+                                    )
+                                }
+
+                                is EngineEvent.DurationChanged -> _state.value = _state.value.copy(
+                                    durationMs = event.durationMs.coerceAtLeast(0L)
+                                )
+
+                                is EngineEvent.VideoSizeChanged -> _state.value = _state.value.copy(
+                                    videoWidth = event.width.coerceAtLeast(0),
+                                    videoHeight = event.height.coerceAtLeast(0)
+                                )
+
+                                is EngineEvent.AudioTracksChanged -> {
+                                    val selected = event.tracks.firstOrNull { it.isSelected }?.id
+                                    currentSession = currentSession?.copy(selectedAudioTrackId = selected)
+                                    _state.value = _state.value.copy(
+                                        session = currentSession,
+                                        audioTracks = event.tracks,
+                                        selectedAudioTrackId = selected
+                                    )
+                                }
+
+                                is EngineEvent.SubtitleTracksChanged -> {
+                                    val selected = event.tracks.firstOrNull { it.isSelected }?.id
+                                    currentSession = currentSession?.copy(selectedSubtitleTrackId = selected)
+                                    _state.value = _state.value.copy(
+                                        session = currentSession,
+                                        subtitleTracks = event.tracks,
+                                        selectedSubtitleTrackId = selected
+                                    )
+                                }
+
+                                EngineEvent.Ended -> {
+                                    endedEventId++
+                                    _state.value = _state.value.copy(endedEventId = endedEventId)
+                                }
+
+                                is EngineEvent.FallbackRequired -> {
+                                    if (activeEngine?.choice != event.choice) {
+                                        val fallbackSession = checkNotNull(currentSession)
+                                        val snapshot = runCatching {
+                                            checkNotNull(activeEngine).snapshot().normalized(fallbackSession)
+                                        }.getOrElse {
+                                            PlaybackSnapshot(
+                                                positionMs = _state.value.positionMs,
+                                                playWhenReady = _state.value.playWhenReady,
+                                                speed = _state.value.speed,
+                                                selectedAudioTrackId = _state.value.selectedAudioTrackId,
+                                                selectedSubtitleTrackId = _state.value.selectedSubtitleTrackId
+                                            )
+                                        }
+                                        currentSession = fallbackSession.copy(
+                                            positionMs = snapshot.positionMs,
+                                            playWhenReady = snapshot.playWhenReady,
+                                            speed = snapshot.speed,
+                                            selectedAudioTrackId = snapshot.selectedAudioTrackId,
+                                            selectedSubtitleTrackId = snapshot.selectedSubtitleTrackId
+                                        )
+                                        releaseQuarantinedEngine(event.cause)
+                                        preferredChoice = event.choice
+                                        activate(event.choice, checkNotNull(currentSession))
+                                    }
+                                }
+
                                 is EngineEvent.PositionChanged -> {
                                     val positionMs = event.positionMs.coerceAtLeast(0L)
                                     currentSession = currentSession?.copy(positionMs = positionMs)
@@ -362,7 +473,18 @@ class PlaybackController(
                                     )
                                 }
 
-                                is EngineEvent.Error -> _state.value = _state.value.copy(error = event.cause)
+                                is EngineEvent.Error -> {
+                                    if (activeEngine?.choice == EngineChoice.EXO) {
+                                        commands.trySend(
+                                            Command.EngineCallback(
+                                                command.generation,
+                                                EngineEvent.FallbackRequired(EngineChoice.VLC, event.cause)
+                                            )
+                                        )
+                                    } else {
+                                        _state.value = _state.value.copy(error = event.cause)
+                                    }
+                                }
                             }
                         }
                     }
@@ -420,6 +542,16 @@ class PlaybackController(
 
         data class SelectAudioTrack(
             val trackId: String?,
+            override val completion: CompletableDeferred<Unit>
+        ) : Command
+
+        data class SelectSubtitleTrack(
+            val trackId: String?,
+            override val completion: CompletableDeferred<Unit>
+        ) : Command
+
+        data class SetPlaybackSpeed(
+            val speed: Float,
             override val completion: CompletableDeferred<Unit>
         ) : Command
 

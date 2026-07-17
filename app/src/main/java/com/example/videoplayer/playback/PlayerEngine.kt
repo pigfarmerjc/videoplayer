@@ -5,7 +5,31 @@ enum class EngineChoice {
     VLC
 }
 
+data class PlayerTrack(
+    val id: String,
+    val label: String,
+    val mimeType: String? = null,
+    val language: String? = null,
+    val isSelected: Boolean = false
+)
+
+class EngineFallbackRequiredException(
+    val fallbackChoice: EngineChoice,
+    message: String,
+    cause: Throwable? = null
+) : IllegalStateException(message, cause)
+
 sealed interface EngineEvent {
+    data class Ready(val durationMs: Long) : EngineEvent
+    data class DurationChanged(val durationMs: Long) : EngineEvent
+    data class VideoSizeChanged(val width: Int, val height: Int) : EngineEvent
+    data class AudioTracksChanged(val tracks: List<PlayerTrack>) : EngineEvent
+    data class SubtitleTracksChanged(val tracks: List<PlayerTrack>) : EngineEvent
+    data object Ended : EngineEvent
+    data class FallbackRequired(
+        val choice: EngineChoice,
+        val cause: Throwable
+    ) : EngineEvent
     data class PositionChanged(val positionMs: Long) : EngineEvent
     data class PlayWhenReadyChanged(val playWhenReady: Boolean) : EngineEvent
     data class PlayingChanged(val isPlaying: Boolean) : EngineEvent
