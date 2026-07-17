@@ -11,6 +11,16 @@ interface GalleryColumnStore {
     fun write(columnCount: Int)
 }
 
+enum class GalleryAspectMode(val persistedValue: String) {
+    SQUARE("square"),
+    ORIGINAL("original")
+}
+
+interface GalleryAspectStore {
+    fun read(): String?
+    fun write(value: String)
+}
+
 data class ContinueWatchingVideo<T : VideoTimelineItem>(
     val video: T,
     val progress: Float
@@ -74,4 +84,28 @@ fun previewGalleryColumnCount(startColumns: Int, zoom: Float): Float {
 fun commitGalleryColumnCount(previewColumns: Float): Int {
     val safePreview = previewColumns.takeIf { it.isFinite() } ?: DEFAULT_GALLERY_COLUMNS.toFloat()
     return safePreview.roundToInt().clampGalleryColumnCount()
+}
+
+fun GalleryAspectStore.readGalleryAspectMode(): GalleryAspectMode {
+    val stored = read()
+    val mode = GalleryAspectMode.entries.firstOrNull { it.persistedValue == stored }
+        ?: GalleryAspectMode.SQUARE
+    if (stored != mode.persistedValue) write(mode.persistedValue)
+    return mode
+}
+
+fun GalleryAspectStore.writeGalleryAspectMode(mode: GalleryAspectMode) {
+    write(mode.persistedValue)
+}
+
+fun buildTimelineSectionIndexMap(sectionItemCounts: List<Int>): IntArray {
+    val totalEntries = sectionItemCounts.sumOf { it.coerceAtLeast(0) + 1 }
+    return IntArray(totalEntries).also { result ->
+        var entryIndex = 0
+        sectionItemCounts.forEachIndexed { sectionIndex, itemCount ->
+            repeat(itemCount.coerceAtLeast(0) + 1) {
+                result[entryIndex++] = sectionIndex
+            }
+        }
+    }
 }

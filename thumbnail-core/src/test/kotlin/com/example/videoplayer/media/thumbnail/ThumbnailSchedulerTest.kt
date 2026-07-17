@@ -198,6 +198,21 @@ class ThumbnailSchedulerTest {
         assertEquals(listOf(true, false), calls)
     }
 
+    @Test
+    fun fastScrollGateIgnoresSlowDragAndUsesHysteresisBeforeSettling() {
+        val gate = FastScrollGate(
+            enterVelocity = 1_800f,
+            exitVelocity = 700f,
+            slowSamplesToExit = 2
+        )
+
+        assertEquals(false, gate.update(isScrollInProgress = true, velocity = 500f))
+        assertEquals(true, gate.update(isScrollInProgress = true, velocity = 2_200f))
+        assertEquals(true, gate.update(isScrollInProgress = true, velocity = 600f))
+        assertEquals(false, gate.update(isScrollInProgress = true, velocity = 500f))
+        assertEquals(false, gate.update(isScrollInProgress = false, velocity = 3_000f))
+    }
+
     private fun resource(name: String, version: Long) = ThumbnailResourceIdentity(
         storageKey = "file:/$name.mp4",
         uri = "content://media/external/video/$name",

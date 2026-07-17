@@ -129,6 +129,24 @@ class VideoTimelineTest {
         assertEquals(listOf("video-6", "video-5", "video-4", "video-3", "video-2"), result.map { it.video.id })
     }
 
+    @Test
+    fun timelineEntryMapPrecomputesHeaderAndItemSectionIndices() {
+        assertEquals(
+            listOf(0, 0, 0, 1, 1),
+            buildTimelineSectionIndexMap(listOf(2, 1)).toList()
+        )
+    }
+
+    @Test
+    fun invalidAspectModeIsRepairedAndOriginalModePersists() {
+        val store = RecordingAspectStore("wide")
+
+        assertEquals(GalleryAspectMode.SQUARE, store.readGalleryAspectMode())
+        assertEquals("square", store.value)
+        store.writeGalleryAspectMode(GalleryAspectMode.ORIGINAL)
+        assertEquals("original", store.value)
+    }
+
     private fun video(id: String, year: Int, month: Int, day: Int, hour: Int, minute: Int) =
         TimelineVideo(id, instant(year, month, day, hour, minute).epochSecond)
 
@@ -142,6 +160,16 @@ class VideoTimelineTest {
 
         override fun write(columnCount: Int) {
             value = columnCount
+        }
+    }
+
+    private class RecordingAspectStore(initial: String?) : GalleryAspectStore {
+        var value = initial
+
+        override fun read(): String? = value
+
+        override fun write(value: String) {
+            this.value = value
         }
     }
 }
