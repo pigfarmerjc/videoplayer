@@ -1,5 +1,7 @@
 package com.example.videoplayer.ui.gallery
 
+import kotlin.math.roundToInt
+
 private const val MIN_GALLERY_COLUMNS = 2
 private const val MAX_GALLERY_COLUMNS = 8
 private const val DEFAULT_GALLERY_COLUMNS = 4
@@ -61,3 +63,14 @@ fun GalleryColumnStore.readClampedColumnCount(): Int {
 }
 
 fun Int.clampGalleryColumnCount(): Int = coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS)
+
+fun previewGalleryColumnCount(startColumns: Int, zoom: Float): Float {
+    val safeZoom = zoom.takeIf { it.isFinite() && it > 0f } ?: 1f
+    return (startColumns.clampGalleryColumnCount() / safeZoom)
+        .coerceIn(MIN_GALLERY_COLUMNS.toFloat(), MAX_GALLERY_COLUMNS.toFloat())
+}
+
+fun commitGalleryColumnCount(previewColumns: Float): Int {
+    val safePreview = previewColumns.takeIf { it.isFinite() } ?: DEFAULT_GALLERY_COLUMNS.toFloat()
+    return safePreview.roundToInt().clampGalleryColumnCount()
+}

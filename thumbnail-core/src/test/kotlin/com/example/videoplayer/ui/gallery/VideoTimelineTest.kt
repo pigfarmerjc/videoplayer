@@ -107,6 +107,14 @@ class VideoTimelineTest {
         assertEquals(2, store.value)
     }
 
+    @Test
+    fun pinchPreviewIsContinuousAndCommitSnapsOnlyOnRelease() {
+        assertEquals(3.2f, previewGalleryColumnCount(startColumns = 4, zoom = 1.25f), 0.001f)
+        assertEquals(3, commitGalleryColumnCount(previewColumns = 3.2f))
+        assertEquals(2, commitGalleryColumnCount(previewColumns = 1.4f))
+        assertEquals(8, commitGalleryColumnCount(previewColumns = 9.1f))
+    }
+
     private fun video(id: String, year: Int, month: Int, day: Int, hour: Int, minute: Int) =
         TimelineVideo(id, instant(year, month, day, hour, minute).epochSecond)
 
