@@ -1,0 +1,1279 @@
+﻿COMMITS
+ae9a1e2 fix: harden thumbnail request identity
+0381155 perf: connect grid thumbnails to scheduler
+c8408d6 perf: add coalescing thumbnail scheduler
+STAT
+ app/build.gradle.kts                               |   1 +
+ .../example/videoplayer/data/model/MediaItem.kt    |   1 +
+ .../videoplayer/data/repository/MediaRepository.kt |  11 +-
+ .../media/thumbnail/ThumbnailDiskCache.kt          | 136 ++++++++++
+ .../media/thumbnail/ThumbnailSchedulerProvider.kt  |  46 ++++
+ .../example/videoplayer/ui/components/MediaGrid.kt |  28 ++-
+ .../videoplayer/ui/screens/FolderDetailScreen.kt   |  13 +
+ .../example/videoplayer/ui/screens/MainScreen.kt   |  25 +-
+ settings.gradle.kts                                |   1 +
+ thumbnail-core/build.gradle.kts                    |  10 +
+ .../media/thumbnail/ThumbnailRequest.kt            |  36 +++
+ .../media/thumbnail/ThumbnailScheduler.kt          | 222 +++++++++++++++++
+ .../media/thumbnail/ThumbnailScrollController.kt   |  13 +
+ .../media/thumbnail/ThumbnailSchedulerTest.kt      | 276 +++++++++++++++++++++
+ 14 files changed, 805 insertions(+), 14 deletions(-)
+DIFF
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index ae2d9d1..85c425a 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -76,20 +76,21 @@ android {
+         resources {
+             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+         }
+         jniLibs {
+             useLegacyPackaging = true
+         }
+     }
+ }
+ 
+ dependencies {
++    implementation(project(":thumbnail-core"))
+     implementation(libs.androidx.core.ktx)
+     implementation(libs.androidx.lifecycle.runtime.ktx)
+     implementation(libs.androidx.activity.compose)
+     
+     // Compose
+     implementation(platform(libs.androidx.compose.bom))
+     implementation(libs.androidx.compose.ui)
+     implementation(libs.androidx.compose.ui.graphics)
+     implementation(libs.androidx.compose.ui.tooling.preview)
+     implementation(libs.androidx.compose.material3)
+diff --git a/app/src/main/java/com/example/videoplayer/data/model/MediaItem.kt b/app/src/main/java/com/example/videoplayer/data/model/MediaItem.kt
+index fb9c01e..44eacec 100644
+--- a/app/src/main/java/com/example/videoplayer/data/model/MediaItem.kt
++++ b/app/src/main/java/com/example/videoplayer/data/model/MediaItem.kt
+@@ -6,17 +6,18 @@ import androidx.compose.runtime.Immutable
+ @Immutable
+ data class MediaItem(
+     val id: Long,
+     val uri: Uri,
+     val title: String,
+     val displayName: String,
+     val path: String,
+     val folderName: String,
+     val size: Long,
+     val dateAdded: Long,
++    val dateModified: Long = dateAdded,
+     val duration: Long = 0L,  // 0 for images, ms for videos/audios
+     val resolution: String = "",
+     val type: MediaType,
+     val artist: String = ""  // Mainly for audio
+ ) {
+     val storageKey: String = if (path.isNotBlank()) "file:$path" else "uri:$uri"
+ }
+diff --git a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+index 5784a79..3291545 100644
+--- a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
++++ b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+@@ -583,110 +583,117 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
+ 
+                 items[key] = MediaItem(
+                     id = stableFileId(path),
+                     uri = Uri.fromFile(file),
+                     title = file.nameWithoutExtension,
+                     displayName = file.name,
+                     path = path,
+                     folderName = getParentFolderName(path, interner),
+                     size = file.length(),
+                     dateAdded = file.lastModified() / 1000,
++                    dateModified = file.lastModified() / 1000,
+                     duration = 0L,
+                     resolution = "",
+                     type = type
+                 )
+             }
+         }
+     }
+ 
+     private fun scanVideos(interner: StringInterner): List<MediaItem> {
+         val projection = arrayOf(
+             MediaStore.Video.Media._ID,
+             MediaStore.Video.Media.DISPLAY_NAME,
+             MediaStore.Video.Media.TITLE,
+             MediaStore.Video.Media.DATA,
+             MediaStore.Video.Media.SIZE,
+             MediaStore.Video.Media.DATE_ADDED,
++            MediaStore.Video.Media.DATE_MODIFIED,
+             MediaStore.Video.Media.DURATION,
+             MediaStore.Video.Media.RESOLUTION
+         )
+         return query(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, projection) { cursor ->
+             val id = cursor.getLong(MediaStore.Video.Media._ID)
+             val path = cursor.getStringOrEmpty(MediaStore.Video.Media.DATA)
+             MediaItem(
+                 id = id,
+                 uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id),
+                 title = cursor.getStringOrEmpty(MediaStore.Video.Media.TITLE).ifEmpty { cursor.getStringOrEmpty(MediaStore.Video.Media.DISPLAY_NAME) },
+                 displayName = cursor.getStringOrEmpty(MediaStore.Video.Media.DISPLAY_NAME).ifEmpty { "Unknown video" },
+                 path = path,
+                 folderName = getParentFolderName(path, interner),
+                 size = cursor.getLong(MediaStore.Video.Media.SIZE),
+                 dateAdded = cursor.getLong(MediaStore.Video.Media.DATE_ADDED),
++                dateModified = cursor.getLong(MediaStore.Video.Media.DATE_MODIFIED),
+                 duration = cursor.getLong(MediaStore.Video.Media.DURATION),
+                 resolution = cursor.getStringOrEmpty(MediaStore.Video.Media.RESOLUTION),
+                 type = MediaType.VIDEO
+             )
+         }
+     }
+ 
+     private fun scanIsoFiles(interner: StringInterner): List<MediaItem> {
+         val filesUri = MediaStore.Files.getContentUri("external")
+         val projection = arrayOf(
+             MediaStore.Files.FileColumns._ID,
+             MediaStore.Files.FileColumns.DISPLAY_NAME,
+             MediaStore.Files.FileColumns.DATA,
+             MediaStore.Files.FileColumns.SIZE,
+-            MediaStore.Files.FileColumns.DATE_ADDED
++            MediaStore.Files.FileColumns.DATE_ADDED,
++            MediaStore.Files.FileColumns.DATE_MODIFIED
+         )
+         val selection = "(${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ? COLLATE NOCASE OR ${MediaStore.Files.FileColumns.DATA} LIKE ? COLLATE NOCASE)"
+         val selectionArgs = arrayOf("%.iso", "%.iso")
+         return query(filesUri, projection, selection, selectionArgs) { cursor ->
+             val id = cursor.getLong(MediaStore.Files.FileColumns._ID)
+             val path = cursor.getStringOrEmpty(MediaStore.Files.FileColumns.DATA)
+             val displayName = cursor.getStringOrEmpty(MediaStore.Files.FileColumns.DISPLAY_NAME).ifEmpty { "Unknown ISO" }
+             MediaItem(
+                 id = id,
+                 uri = ContentUris.withAppendedId(filesUri, id),
+                 title = displayName,
+                 displayName = displayName,
+                 path = interner.intern(path),
+                 folderName = getParentFolderName(path, interner),
+                 size = cursor.getLong(MediaStore.Files.FileColumns.SIZE),
+                 dateAdded = cursor.getLong(MediaStore.Files.FileColumns.DATE_ADDED),
++                dateModified = cursor.getLong(MediaStore.Files.FileColumns.DATE_MODIFIED),
+                 duration = 0L,
+                 resolution = "",
+                 type = MediaType.VIDEO
+             )
+         }
+     }
+ 
+     private fun scanImages(interner: StringInterner): List<MediaItem> {
+         val projection = arrayOf(
+             MediaStore.Images.Media._ID,
+             MediaStore.Images.Media.DISPLAY_NAME,
+             MediaStore.Images.Media.TITLE,
+             MediaStore.Images.Media.DATA,
+             MediaStore.Images.Media.SIZE,
+-            MediaStore.Images.Media.DATE_ADDED
++            MediaStore.Images.Media.DATE_ADDED,
++            MediaStore.Images.Media.DATE_MODIFIED
+         )
+         return query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, projection) { cursor ->
+             val id = cursor.getLong(MediaStore.Images.Media._ID)
+             val path = cursor.getStringOrEmpty(MediaStore.Images.Media.DATA)
+             MediaItem(
+                 id = id,
+                 uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id),
+                 title = cursor.getStringOrEmpty(MediaStore.Images.Media.TITLE).ifEmpty { cursor.getStringOrEmpty(MediaStore.Images.Media.DISPLAY_NAME) },
+                 displayName = cursor.getStringOrEmpty(MediaStore.Images.Media.DISPLAY_NAME).ifEmpty { "Unknown image" },
+                 path = path,
+                 folderName = getParentFolderName(path, interner),
+                 size = cursor.getLong(MediaStore.Images.Media.SIZE),
+                 dateAdded = cursor.getLong(MediaStore.Images.Media.DATE_ADDED),
++                dateModified = cursor.getLong(MediaStore.Images.Media.DATE_MODIFIED),
+                 type = MediaType.PHOTO
+             )
+         }
+     }
+ 
+     private fun query(
+         uri: Uri,
+         projection: Array<String>,
+         selection: String? = null,
+         selectionArgs: Array<String>? = null,
+diff --git a/app/src/main/java/com/example/videoplayer/media/thumbnail/ThumbnailDiskCache.kt b/app/src/main/java/com/example/videoplayer/media/thumbnail/ThumbnailDiskCache.kt
+new file mode 100644
+index 0000000..51afd62
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/media/thumbnail/ThumbnailDiskCache.kt
+@@ -0,0 +1,136 @@
++package com.example.videoplayer.media.thumbnail
++
++import android.content.ComponentCallbacks2
++import android.content.Context
++import android.content.res.Configuration
++import android.graphics.Bitmap
++import android.graphics.BitmapFactory
++import android.os.Build
++import android.util.LruCache
++import android.util.Size
++import com.example.videoplayer.data.model.MediaItem
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.channels.Channel
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import java.io.File
++import java.security.MessageDigest
++
++class ThumbnailDiskCache private constructor(
++    private val context: Context
++) : ThumbnailCache<Bitmap, MediaItem>, ComponentCallbacks2 {
++    private val maintenance = Channel<Unit>(Channel.CONFLATED)
++    private val maintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++    private val cache = object : LruCache<ThumbnailKey, Bitmap>(memoryCacheSizeKb()) {
++        override fun sizeOf(key: ThumbnailKey, value: Bitmap): Int = value.byteCount / 1024
++    }
++
++    init {
++        context.registerComponentCallbacks(this)
++        maintenanceScope.launch {
++            for (ignored in maintenance) {
++                trimDiskCache()
++            }
++        }
++    }
++
++    override suspend fun loadMemory(key: ThumbnailKey): Bitmap? = cache.get(key)
++
++    override suspend fun loadDisk(key: ThumbnailKey): Bitmap? = withContext(Dispatchers.IO) {
++        val file = diskFile(key)
++        if (!file.exists() || file.length() == 0L) return@withContext null
++        BitmapFactory.decodeFile(
++            file.absolutePath,
++            BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
++        )?.also { file.setLastModified(System.currentTimeMillis()) }
++    }
++
++    override suspend fun decode(key: ThumbnailKey, source: MediaItem): Bitmap? = withContext(Dispatchers.IO) {
++        runCatching {
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++                context.contentResolver.loadThumbnail(source.uri, Size(key.size.width, key.size.height), null)
++            } else {
++                @Suppress("DEPRECATION")
++                android.provider.MediaStore.Video.Thumbnails.getThumbnail(
++                    context.contentResolver,
++                    source.id,
++                    android.provider.MediaStore.Video.Thumbnails.MINI_KIND,
++                    null
++                )
++            }
++        }.getOrNull()?.toRgb565()
++    }
++
++    override suspend fun putMemory(key: ThumbnailKey, value: Bitmap) {
++        cache.put(key, value)
++    }
++
++    override suspend fun writeDisk(key: ThumbnailKey, value: Bitmap) {
++        withContext(Dispatchers.IO) {
++        runCatching {
++            diskFile(key).outputStream().use { output ->
++                check(value.compress(Bitmap.CompressFormat.JPEG, 82, output)) { "缩略图写入失败" }
++            }
++            maintenance.trySend(Unit)
++        }
++        }
++    }
++
++    override fun onTrimMemory(level: Int) {
++        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) cache.evictAll()
++    }
++
++    override fun onConfigurationChanged(newConfig: Configuration) = Unit
++
++    override fun onLowMemory() {
++        cache.evictAll()
++    }
++
++    private fun diskFile(key: ThumbnailKey): File {
++        val directory = File(context.cacheDir, "grid_thumbnails").apply { mkdirs() }
++        return File(directory, "${key.resource.storageKey}|${key.resource.uri}|${key.resource.dateModified}|${key.size.width}x${key.size.height}".sha256() + ".jpg")
++    }
++
++    private fun trimDiskCache() {
++        val files = File(context.cacheDir, "grid_thumbnails")
++            .listFiles { file -> file.extension.equals("jpg", ignoreCase = true) }
++            ?.sortedByDescending(File::lastModified)
++            ?: return
++        var totalBytes = 0L
++        files.forEachIndexed { index, file ->
++            totalBytes += file.length()
++            if (index >= MAX_DISK_ENTRIES || totalBytes > MAX_DISK_BYTES) {
++                file.delete()
++            }
++        }
++    }
++
++    private fun Bitmap.toRgb565(): Bitmap {
++        if (config == Bitmap.Config.RGB_565) return this
++        return Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565).also { destination ->
++            android.graphics.Canvas(destination).drawBitmap(this, 0f, 0f, null)
++            recycle()
++        }
++    }
++
++    private fun String.sha256(): String = MessageDigest.getInstance("SHA-256")
++        .digest(toByteArray())
++        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
++
++    private fun memoryCacheSizeKb(): Int =
++        (Runtime.getRuntime().maxMemory() / 1024L / 12L).toInt().coerceIn(8 * 1024, 48 * 1024)
++
++    companion object {
++        private const val MAX_DISK_ENTRIES = 2_500
++        private const val MAX_DISK_BYTES = 128L * 1024L * 1024L
++
++        @Volatile
++        private var instance: ThumbnailDiskCache? = null
++
++        fun get(context: Context): ThumbnailDiskCache = instance ?: synchronized(this) {
++            instance ?: ThumbnailDiskCache(context.applicationContext).also { instance = it }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerProvider.kt b/app/src/main/java/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerProvider.kt
+new file mode 100644
+index 0000000..22f846c
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerProvider.kt
+@@ -0,0 +1,46 @@
++package com.example.videoplayer.media.thumbnail
++
++import android.content.Context
++import android.graphics.Bitmap
++import com.example.videoplayer.data.model.MediaItem
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.flow.Flow
++
++object ThumbnailSchedulerProvider {
++    @Volatile
++    private var scheduler: ThumbnailScheduler<Bitmap, MediaItem>? = null
++
++    @Volatile
++    private var isFastScrolling = false
++
++    fun request(
++        context: Context,
++        item: MediaItem,
++        size: ThumbnailSize,
++        priority: ThumbnailPriority
++    ): Flow<ThumbnailResult<Bitmap>> {
++        val current = scheduler ?: synchronized(this) {
++            scheduler ?: ThumbnailScheduler(
++                cache = ThumbnailDiskCache.get(context),
++                scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
++            ).also {
++                it.setFastScrolling(isFastScrolling)
++                scheduler = it
++            }
++        }
++        return current.request(item.thumbnailResourceIdentity(), item, size, priority)
++    }
++
++    fun setFastScrolling(isFastScrolling: Boolean) {
++        this.isFastScrolling = isFastScrolling
++        scheduler?.setFastScrolling(isFastScrolling)
++    }
++
++    private fun MediaItem.thumbnailResourceIdentity() = ThumbnailResourceIdentity(
++        storageKey = storageKey,
++        uri = uri.toString(),
++        dateModified = dateModified
++    )
++}
+diff --git a/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt b/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt
+index 2e8d8c6..a39b049 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt
+@@ -52,20 +52,23 @@ import androidx.compose.animation.core.animateFloatAsState
+ import androidx.compose.animation.core.spring
+ import androidx.compose.ui.graphics.graphicsLayer
+ import coil.compose.AsyncImage
+ import coil.decode.GifDecoder
+ import coil.decode.ImageDecoderDecoder
+ import coil.request.ImageRequest
+ import com.example.videoplayer.data.model.MediaFolder
+ import com.example.videoplayer.data.model.MediaItem
+ import com.example.videoplayer.data.model.MediaType
+ import com.example.videoplayer.data.repository.MediaRepository
++import com.example.videoplayer.media.thumbnail.ThumbnailPriority
++import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
++import com.example.videoplayer.media.thumbnail.ThumbnailSize
+ import com.example.videoplayer.ui.theme.AccentPink
+ import com.example.videoplayer.ui.theme.CardObsidian
+ import com.example.videoplayer.ui.theme.PrimaryNeonPurple
+ import com.example.videoplayer.ui.theme.SecondaryNeonCyan
+ import com.example.videoplayer.ui.theme.TextMuted
+ import com.example.videoplayer.ui.theme.TextPrimary
+ import com.example.videoplayer.ui.theme.TextSecondary
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.sync.Semaphore
+ import kotlinx.coroutines.sync.withPermit
+@@ -745,68 +748,71 @@ fun folderDisplayName(name: String): String = when (name) {
+     MediaRepository.ALL_PHOTOS -> "全部照片"
+     MediaRepository.INTERNAL_VIDEOS -> "本机视频"
+     MediaRepository.TF_CARD_VIDEOS -> "TF 卡视频"
+     MediaRepository.RECENT_PLAYED -> "最近播放"
+     MediaRepository.RECENT_ADDED -> "最近添加"
+     MediaRepository.FAVORITES -> "收藏夹"
+     else -> name
+ }
+ 
+ @Composable
+-fun mediaPreviewRequest(item: MediaItem): ImageRequest {
++fun mediaPreviewRequest(item: MediaItem, allowAnimated: Boolean = true): ImageRequest {
+     val context = LocalContext.current
+     return remember(item.storageKey, context) {
+         val builder = ImageRequest.Builder(context)
+             .data(item.uri)
+             .crossfade(false)
+-        if (item.type == MediaType.PHOTO && item.displayName.endsWith(".gif", ignoreCase = true)) {
++        if (allowAnimated && item.type == MediaType.PHOTO && item.displayName.endsWith(".gif", ignoreCase = true)) {
+             if (android.os.Build.VERSION.SDK_INT >= 28) {
+                 builder.decoderFactory(ImageDecoderDecoder.Factory())
+             } else {
+                 builder.decoderFactory(GifDecoder.Factory())
+             }
+         }
+         builder.build()
+     }
+ }
+ 
+ @Composable
+ private fun LightweightMediaPreview(item: MediaItem, contentDescription: String?) {
+     if (item.type == MediaType.VIDEO) {
+         val context = LocalContext.current
+-        var bitmapState by remember(item.storageKey) {
+-            mutableStateOf(VideoThumbnailCache.get(item.storageKey))
++        val thumbnailSize = remember { ThumbnailSize(360, 220) }
++        var bitmapState by remember(item.storageKey, item.uri, item.dateModified, thumbnailSize) {
++            mutableStateOf<Bitmap?>(null)
+         }
+ 
+-        LaunchedEffect(item.storageKey) {
+-            if (VideoThumbnailCache.get(item.storageKey) == null) {
+-                val bitmap = VideoThumbnailCache.load(context, item)
+-                if (bitmap != null) {
+-                    bitmapState = bitmap
+-                }
++        LaunchedEffect(item.storageKey, item.uri, item.dateModified, thumbnailSize) {
++            ThumbnailSchedulerProvider.request(
++                context = context,
++                item = item,
++                size = thumbnailSize,
++                priority = ThumbnailPriority.VISIBLE
++            ).collect { result ->
++                bitmapState = result.value
+             }
+         }
+ 
+         val currentBitmap = bitmapState
+         if (currentBitmap != null) {
+             Image(
+                 bitmap = currentBitmap.asImageBitmap(),
+                 contentDescription = contentDescription,
+                 modifier = Modifier.fillMaxSize(),
+                 contentScale = ContentScale.Crop
+             )
+         } else {
+             VideoThumbnailPlaceholder(contentDescription)
+         }
+     } else {
+         AsyncImage(
+-            model = mediaPreviewRequest(item),
++            model = mediaPreviewRequest(item, allowAnimated = false),
+             contentDescription = contentDescription,
+             modifier = Modifier.fillMaxSize(),
+             contentScale = ContentScale.Crop
+         )
+     }
+ }
+ 
+ @Composable
+ private fun VideoThumbnailPlaceholder(contentDescription: String?) {
+     Box(
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/FolderDetailScreen.kt b/app/src/main/java/com/example/videoplayer/ui/screens/FolderDetailScreen.kt
+index 7b2d7e8..2ca295a 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/screens/FolderDetailScreen.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/screens/FolderDetailScreen.kt
+@@ -41,20 +41,22 @@ import com.example.videoplayer.data.model.MediaType
+ import com.example.videoplayer.data.repository.MediaRepository
+ import com.example.videoplayer.ui.components.MediaGridTile
+ import com.example.videoplayer.ui.components.MediaItemCard
+ import com.example.videoplayer.data.model.LayoutMode
+ import com.example.videoplayer.ui.components.MediaGalleryTile
+ import androidx.compose.material.icons.filled.Collections
+ import com.example.videoplayer.ui.components.folderDisplayName
+ import com.example.videoplayer.ui.components.GlassmorphicCard
+ import com.example.videoplayer.ui.components.AppBackground
+ import com.example.videoplayer.ui.components.bounceClick
++import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
++import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
+ import com.example.videoplayer.ui.theme.CarbonBg
+ import com.example.videoplayer.ui.theme.CarbonBorder
+ import com.example.videoplayer.ui.theme.SecondaryNeonCyan
+ import com.example.videoplayer.ui.theme.TextSecondary
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import java.io.File
+ import kotlin.math.roundToInt
+ 
+@@ -86,20 +88,31 @@ fun FolderDetailScreen(
+     var lastViewedKey by remember(folderName, visibleItems) { mutableStateOf(repository.lastViewedKey(folderName)) }
+     val listState = rememberLazyListState(
+         initialFirstVisibleItemIndex = repository.lastViewedIndex(folderName, visibleItems)
+     )
+     val gridState = rememberLazyGridState(
+         initialFirstVisibleItemIndex = repository.lastViewedIndex(folderName, visibleItems)
+     )
+     val lifecycleOwner = LocalContext.current as? LifecycleOwner
+     val scope = rememberCoroutineScope()
+     var layoutMode by remember { mutableStateOf(repository.getFolderLayoutMode()) }
++    val thumbnailScrollController = remember {
++        ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
++    }
++    LaunchedEffect(layoutMode, listState.isScrollInProgress, gridState.isScrollInProgress) {
++        val isScrolling = if (layoutMode == LayoutMode.LIST) {
++            listState.isScrollInProgress
++        } else {
++            gridState.isScrollInProgress
++        }
++        thumbnailScrollController.onScrollInProgressChanged(isScrolling)
++    }
+     var galleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
+     // 网格尺寸档位: 140=小, 220=中, 320=大
+     var gridSizeDp by remember { mutableIntStateOf(repository.getFolderGridSize()) }
+     var selectedKeys by remember(folderName) { mutableStateOf<Set<String>>(emptySet()) }
+     var favoriteKeys by remember(folderName, visibleItems) { mutableStateOf(repository.favoriteKeySnapshot()) }
+     var playlistKeys by remember(folderName, visibleItems) { mutableStateOf(repository.playlistKeySnapshot()) }
+     var showMoveDialog by remember { mutableStateOf(false) }
+     val snackbarHostState = remember { SnackbarHostState() }
+     val selectedItems = remember(selectedKeys, visibleItems) {
+         visibleItems.filter { it.storageKey in selectedKeys }
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+index be88c8a..75f1429 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+@@ -3,23 +3,25 @@ package com.example.videoplayer.ui.screens
+ import android.Manifest
+ import android.content.pm.PackageManager
+ import android.os.Build
+ import androidx.activity.compose.rememberLauncherForActivityResult
+ import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.border
+ import androidx.compose.foundation.layout.*
+ import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.rememberLazyListState
+ import androidx.compose.foundation.lazy.grid.GridCells
+ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+ import androidx.compose.foundation.lazy.grid.items as gridItems
++import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+ import androidx.compose.foundation.lazy.items
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.filled.Sort
+ import androidx.compose.material.icons.automirrored.filled.ViewList
+ import androidx.compose.material.icons.filled.Close
+ import androidx.compose.material.icons.filled.Folder
+ import androidx.compose.material.icons.filled.GridView
+ import androidx.compose.material.icons.filled.Image
+ import androidx.compose.material.icons.filled.Info
+@@ -61,20 +63,22 @@ import androidx.compose.foundation.gestures.awaitEachGesture
+ import androidx.compose.foundation.gestures.awaitFirstDown
+ import androidx.compose.ui.input.pointer.pointerInput
+ import com.example.videoplayer.ui.components.FolderCard
+ import com.example.videoplayer.ui.components.FolderGridTile
+ import com.example.videoplayer.ui.components.GlassmorphicCard
+ import com.example.videoplayer.ui.components.AppBackground
+ import com.example.videoplayer.ui.components.MediaGridTile
+ import com.example.videoplayer.ui.components.MediaItemCard
+ import com.example.videoplayer.ui.components.mediaPreviewRequest
+ import com.example.videoplayer.ui.components.bounceClick
++import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
++import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
+ import com.example.videoplayer.ui.theme.*
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.withContext
+ import androidx.lifecycle.LifecycleEventObserver
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.LifecycleOwner
+ import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.animation.core.animateFloat
+@@ -608,21 +612,32 @@ private fun MediaList(
+     repository: MediaRepository,
+     onFavorite: (MediaItem) -> Unit,
+     onPlaylist: (MediaItem) -> Unit,
+     onNavigateToVideo: (Long, String) -> Unit,
+     onNavigateToPhoto: (Long, String) -> Unit
+ ) {
+     if (items.isEmpty()) {
+         EmptyStateView("No media items found")
+     } else {
+         val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
+-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 96.dp)) {
++        val listState = rememberLazyListState()
++        val thumbnailScrollController = remember {
++            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
++        }
++        LaunchedEffect(listState.isScrollInProgress) {
++            thumbnailScrollController.onScrollInProgressChanged(listState.isScrollInProgress)
++        }
++        LazyColumn(
++            state = listState,
++            verticalArrangement = Arrangement.spacedBy(10.dp),
++            contentPadding = PaddingValues(bottom = 96.dp)
++        ) {
+             items(
+                 items,
+                 key = { it.storageKey },
+                 contentType = { it.type }
+             ) { item ->
+                 MediaItemCard(
+                     item = item,
+                     isFavorite = item.storageKey in favoriteKeys,
+                     isInPlaylist = item.storageKey in playlistKeys,
+                     progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+@@ -649,21 +664,29 @@ private fun MediaGridView(
+     progressSnapshot: Map<String, Float>,
+     repository: MediaRepository,
+     gridSizeDp: Int = 220,
+     onNavigateToVideo: (Long, String) -> Unit,
+     onNavigateToPhoto: (Long, String) -> Unit
+ ) {
+     if (items.isEmpty()) {
+         EmptyStateView("No media items found")
+     } else {
+         val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
++        val gridState = rememberLazyGridState()
++        val thumbnailScrollController = remember {
++            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
++        }
++        LaunchedEffect(gridState.isScrollInProgress) {
++            thumbnailScrollController.onScrollInProgressChanged(gridState.isScrollInProgress)
++        }
+         LazyVerticalGrid(
++            state = gridState,
+             columns = GridCells.Adaptive(gridSizeDp.dp),
+             verticalArrangement = Arrangement.spacedBy(16.dp),
+             horizontalArrangement = Arrangement.spacedBy(16.dp),
+             contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp)
+         ) {
+             gridItems(
+                 items,
+                 key = { it.storageKey },
+                 contentType = { it.type }
+             ) { item ->
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+index cbe44cd..dbc0dca 100644
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -14,11 +14,12 @@ pluginManagement {
+ dependencyResolutionManagement {
+     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+     repositories {
+         google()
+         mavenCentral()
+     }
+ }
+ 
+ rootProject.name = "VideoPlayer"
+ include(":app")
++include(":thumbnail-core")
+ include(":benchmark")
+diff --git a/thumbnail-core/build.gradle.kts b/thumbnail-core/build.gradle.kts
+new file mode 100644
+index 0000000..06022bd
+--- /dev/null
++++ b/thumbnail-core/build.gradle.kts
+@@ -0,0 +1,10 @@
++plugins {
++    kotlin("jvm")
++}
++
++layout.buildDirectory.set(file("${System.getProperty("java.io.tmpdir")}/videoplayer-thumbnail-core"))
++
++dependencies {
++    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
++    testImplementation("junit:junit:4.13.2")
++}
+diff --git a/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailRequest.kt b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailRequest.kt
+new file mode 100644
+index 0000000..18f62a5
+--- /dev/null
++++ b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailRequest.kt
+@@ -0,0 +1,36 @@
++package com.example.videoplayer.media.thumbnail
++
++data class ThumbnailSize(
++    val width: Int,
++    val height: Int
++)
++
++data class ThumbnailResourceIdentity(
++    val storageKey: String,
++    val uri: String,
++    val dateModified: Long
++)
++
++data class ThumbnailKey(
++    val resource: ThumbnailResourceIdentity,
++    val size: ThumbnailSize
++)
++
++enum class ThumbnailPriority {
++    VISIBLE,
++    PREFETCH,
++    BACKGROUND
++}
++
++data class ThumbnailResult<T : Any>(
++    val key: ThumbnailKey,
++    val value: T
++)
++
++interface ThumbnailCache<T : Any, S : Any> {
++    suspend fun loadMemory(key: ThumbnailKey): T?
++    suspend fun loadDisk(key: ThumbnailKey): T?
++    suspend fun decode(key: ThumbnailKey, source: S): T?
++    suspend fun putMemory(key: ThumbnailKey, value: T)
++    suspend fun writeDisk(key: ThumbnailKey, value: T)
++}
+diff --git a/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailScheduler.kt b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailScheduler.kt
+new file mode 100644
+index 0000000..a5f6872
+--- /dev/null
++++ b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailScheduler.kt
+@@ -0,0 +1,222 @@
++package com.example.videoplayer.media.thumbnail
++
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.NonCancellable
++import kotlinx.coroutines.channels.Channel
++import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.flow
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import java.util.PriorityQueue
++import java.util.concurrent.atomic.AtomicLong
++
++class ThumbnailScheduler<T : Any, S : Any>(
++    private val cache: ThumbnailCache<T, S>,
++    private val scope: CoroutineScope,
++    private val decodeWorkerCount: Int = 2
++) {
++    private val commands = Channel<Command<T, S>>(Channel.UNLIMITED)
++    private val diskWrites = Channel<DiskWrite<T>>(Channel.UNLIMITED)
++    private val requestIds = AtomicLong()
++
++    init {
++        require(decodeWorkerCount > 0) { "decodeWorkerCount must be positive" }
++        scope.launch { processCommands() }
++        scope.launch {
++            for (write in diskWrites) {
++                runCatching { cache.writeDisk(write.key, write.value) }
++            }
++        }
++    }
++
++    fun request(
++        resource: ThumbnailResourceIdentity,
++        source: S,
++        size: ThumbnailSize,
++        priority: ThumbnailPriority
++    ): Flow<ThumbnailResult<T>> = flow {
++        val response = Channel<ThumbnailResult<T>>(capacity = 1)
++        val requestId = requestIds.incrementAndGet()
++        val key = ThumbnailKey(resource, size)
++        commands.send(Command.Request(requestId, key, source, priority, response))
++        try {
++            response.receiveCatching().getOrNull()?.let { emit(it) }
++        } finally {
++            commands.trySend(Command.Cancel(requestId, key))
++            response.close()
++        }
++    }
++
++    fun setFastScrolling(isFastScrolling: Boolean) {
++        commands.trySend(Command.SetFastScrolling(isFastScrolling))
++    }
++
++    private suspend fun processCommands() {
++        val queued = PriorityQueue<InFlight<T, S>>(compareBy<InFlight<T, S>> { it.priority.ordinal }.thenBy { it.order })
++        val inFlight = mutableMapOf<ThumbnailKey, InFlight<T, S>>()
++        var fastScrolling = false
++        var activeDecodes = 0
++        var nextOrder = 0L
++
++        fun startDiskLookup(flight: InFlight<T, S>) {
++            flight.diskLookupJob = scope.launch {
++                val value = runCatching { cache.loadDisk(flight.key) }.getOrNull()
++                withContext(NonCancellable) {
++                    commands.send(Command.DiskLookupCompleted(flight, value))
++                }
++            }
++        }
++
++        fun startDecode(flight: InFlight<T, S>) {
++            flight.started = true
++            activeDecodes++
++            flight.decodeJob = scope.launch {
++                val value = runCatching { cache.decode(flight.key, flight.source) }.getOrNull()
++                withContext(NonCancellable) {
++                    commands.send(Command.DecodeCompleted(flight, value))
++                }
++            }
++        }
++
++        fun releaseDecodePermit(flight: InFlight<T, S>) {
++            if (flight.started && !flight.decodePermitReleased) {
++                flight.decodePermitReleased = true
++                activeDecodes--
++            }
++        }
++
++        fun startQueuedDecodes() {
++            while (!fastScrolling && activeDecodes < decodeWorkerCount && queued.isNotEmpty()) {
++                val flight = queued.remove()
++                if (inFlight[flight.key] === flight && flight.requesters.isNotEmpty()) {
++                    startDecode(flight)
++                }
++            }
++        }
++
++        fun deliver(flight: InFlight<T, S>, value: T?) {
++            inFlight.remove(flight.key, flight)
++            if (value != null) {
++                val result = ThumbnailResult(flight.key, value)
++                flight.requesters.values.forEach { response ->
++                    response.trySend(result)
++                    response.close()
++                }
++                diskWrites.trySend(DiskWrite(flight.key, value))
++            } else {
++                flight.requesters.values.forEach { it.close() }
++            }
++            flight.requesters.clear()
++        }
++
++        for (command in commands) {
++            when (command) {
++                is Command.Request -> {
++                    val memory = cache.loadMemory(command.key)
++                    if (memory != null) {
++                        command.response.trySend(ThumbnailResult(command.key, memory))
++                        command.response.close()
++                    } else {
++                        val existing = inFlight[command.key]
++                        if (existing == null) {
++                            val flight = InFlight<T, S>(
++                                key = command.key,
++                                source = command.source,
++                                priority = command.priority,
++                                order = nextOrder++
++                            )
++                            flight.requesters[command.requestId] = command.response
++                            inFlight[command.key] = flight
++                            startDiskLookup(flight)
++                        } else {
++                            existing.requesters[command.requestId] = command.response
++                            if (!existing.started && command.priority.ordinal < existing.priority.ordinal) {
++                                if (!existing.diskLookupPending) queued.remove(existing)
++                                existing.priority = command.priority
++                                if (!existing.diskLookupPending) queued += existing
++                            }
++                        }
++                    }
++                    startQueuedDecodes()
++                }
++
++                is Command.DiskLookupCompleted -> {
++                    val flight = command.flight
++                    if (inFlight[flight.key] === flight) {
++                        flight.diskLookupPending = false
++                        if (command.value != null) {
++                            cache.putMemory(flight.key, command.value)
++                            deliver(flight, command.value)
++                        } else if (flight.requesters.isNotEmpty()) {
++                            queued += flight
++                        }
++                    }
++                    startQueuedDecodes()
++                }
++
++                is Command.SetFastScrolling -> {
++                    fastScrolling = command.value
++                    startQueuedDecodes()
++                }
++
++                is Command.Cancel -> {
++                    val flight = inFlight[command.key] ?: continue
++                    flight.requesters.remove(command.requestId)
++                    if (flight.requesters.isEmpty()) {
++                        if (!flight.started && !flight.diskLookupPending) queued.remove(flight)
++                        inFlight.remove(command.key, flight)
++                        flight.diskLookupJob?.cancel()
++                        flight.decodeJob?.cancel()
++                        releaseDecodePermit(flight)
++                    }
++                    startQueuedDecodes()
++                }
++
++                is Command.DecodeCompleted -> {
++                    val flight = command.flight
++                    releaseDecodePermit(flight)
++                    if (inFlight[flight.key] === flight) {
++                        command.value?.let { cache.putMemory(flight.key, it) }
++                        deliver(flight, command.value)
++                    }
++                    startQueuedDecodes()
++                }
++            }
++        }
++    }
++
++    private class InFlight<T : Any, S : Any>(
++        val key: ThumbnailKey,
++        val source: S,
++        var priority: ThumbnailPriority,
++        val order: Long,
++        val requesters: MutableMap<Long, Channel<ThumbnailResult<T>>> = linkedMapOf(),
++        var diskLookupPending: Boolean = true,
++        var started: Boolean = false,
++        var decodePermitReleased: Boolean = false,
++        var diskLookupJob: Job? = null,
++        var decodeJob: Job? = null
++    )
++
++    private data class DiskWrite<T : Any>(val key: ThumbnailKey, val value: T)
++
++    private sealed interface Command<T : Any, S : Any> {
++        data class Request<T : Any, S : Any>(
++            val requestId: Long,
++            val key: ThumbnailKey,
++            val source: S,
++            val priority: ThumbnailPriority,
++            val response: Channel<ThumbnailResult<T>>
++        ) : Command<T, S>
++
++        data class DiskLookupCompleted<T : Any, S : Any>(
++            val flight: InFlight<T, S>,
++            val value: T?
++        ) : Command<T, S>
++
++        data class SetFastScrolling<T : Any, S : Any>(val value: Boolean) : Command<T, S>
++        data class Cancel<T : Any, S : Any>(val requestId: Long, val key: ThumbnailKey) : Command<T, S>
++        data class DecodeCompleted<T : Any, S : Any>(val flight: InFlight<T, S>, val value: T?) : Command<T, S>
++    }
++}
+diff --git a/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailScrollController.kt b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailScrollController.kt
+new file mode 100644
+index 0000000..7dfda8b
+--- /dev/null
++++ b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailScrollController.kt
+@@ -0,0 +1,13 @@
++package com.example.videoplayer.media.thumbnail
++
++class ThumbnailScrollController(
++    private val setFastScrolling: (Boolean) -> Unit
++) {
++    private var isFastScrolling = false
++
++    fun onScrollInProgressChanged(isInProgress: Boolean) {
++        if (isFastScrolling == isInProgress) return
++        isFastScrolling = isInProgress
++        setFastScrolling(isInProgress)
++    }
++}
+diff --git a/thumbnail-core/src/test/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerTest.kt b/thumbnail-core/src/test/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerTest.kt
+new file mode 100644
+index 0000000..85950c8
+--- /dev/null
++++ b/thumbnail-core/src/test/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerTest.kt
+@@ -0,0 +1,276 @@
++package com.example.videoplayer.media.thumbnail
++
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.NonCancellable
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.async
++import kotlinx.coroutines.cancelAndJoin
++import kotlinx.coroutines.flow.single
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withContext
++import kotlinx.coroutines.withTimeout
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class ThumbnailSchedulerTest {
++    @Test
++    fun duplicateRequestsForSameResourceVersionShareOneDecode() = runBlocking {
++        val cache = DeferredThumbnailCache()
++        val scheduler = scheduler(cache)
++        val resource = resource("video-1", version = 10)
++        val size = ThumbnailSize(180, 120)
++
++        val first = async(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(resource, "first-source", size, ThumbnailPriority.VISIBLE).single()
++        }
++        cache.awaitDecodeStart(resource, size, 1)
++        val second = async(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(resource, "second-source", size, ThumbnailPriority.PREFETCH).single()
++        }
++
++        cache.completeDecode(resource, size, 1, "first-frame")
++
++        assertEquals("first-frame", first.await().value)
++        assertEquals("first-frame", second.await().value)
++        assertEquals(1, cache.decodeStarts.size)
++    }
++
++    @Test
++    fun diskHitPublishesWithoutStartingDecode() = runBlocking {
++        val cache = DeferredThumbnailCache()
++        val scheduler = scheduler(cache)
++        val resource = resource("video-1", version = 10)
++        val size = ThumbnailSize(180, 120)
++        cache.disk[ThumbnailKey(resource, size)] = "disk-frame"
++
++        val result = scheduler.request(resource, "source", size, ThumbnailPriority.VISIBLE).single()
++
++        assertEquals("disk-frame", result.value)
++        assertTrue(cache.decodeStarts.isEmpty())
++    }
++
++    @Test
++    fun slowDiskLookupDoesNotBlockCancellationOrVisibleDecode() = runBlocking {
++        val cache = DeferredThumbnailCache()
++        val scheduler = scheduler(cache)
++        val slowResource = resource("slow", version = 1)
++        val visibleResource = resource("visible", version = 1)
++        val size = ThumbnailSize(180, 120)
++        cache.delayDisk(slowResource, size)
++
++        val slowRequest = launch(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(slowResource, "slow-source", size, ThumbnailPriority.BACKGROUND).collect { }
++        }
++        cache.awaitDiskStart(slowResource, size)
++        slowRequest.cancelAndJoin()
++        val visible = async(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(visibleResource, "visible-source", size, ThumbnailPriority.VISIBLE).single()
++        }
++
++        cache.awaitDecodeStart(visibleResource, size, 1)
++        cache.completeDecode(visibleResource, size, 1, "visible-frame")
++
++        assertEquals("visible-frame", visible.await().value)
++        assertTrue(cache.decodeStarts.none { it.key.resource == slowResource })
++    }
++
++    @Test
++    fun visibleUpgradeRunsBeforeQueuedBackgroundWorkAfterScrollingSettles() = runBlocking {
++        val cache = DeferredThumbnailCache()
++        val scheduler = scheduler(cache)
++        val background = resource("background", version = 1)
++        val upgraded = resource("upgraded", version = 1)
++        val size = ThumbnailSize(180, 120)
++        cache.delayDisk(background, size)
++        cache.delayDisk(upgraded, size)
++
++        scheduler.setFastScrolling(true)
++        val backgroundRequest = async(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(background, "background-source", size, ThumbnailPriority.BACKGROUND).single()
++        }
++        val upgradeRequest = async(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(upgraded, "prefetch-source", size, ThumbnailPriority.BACKGROUND).single()
++        }
++        val visibleUpgrade = async(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(upgraded, "visible-source", size, ThumbnailPriority.VISIBLE).single()
++        }
++        cache.awaitMemoryLookups(3)
++        cache.awaitDiskStart(background, size)
++        cache.awaitDiskStart(upgraded, size)
++        cache.completeDisk(background, size, null)
++        cache.completeDisk(upgraded, size, null)
++        cache.awaitDiskCompletions(2)
++        kotlinx.coroutines.yield()
++        scheduler.setFastScrolling(false)
++
++        cache.awaitDecodeStart(upgraded, size, 1)
++        assertEquals(upgraded, cache.decodeStarts.single().key.resource)
++        cache.completeDecode(upgraded, size, 1, "upgraded-frame")
++        cache.awaitDecodeStart(background, size, 1)
++        cache.completeDecode(background, size, 1, "background-frame")
++
++        assertEquals("upgraded-frame", upgradeRequest.await().value)
++        assertEquals("upgraded-frame", visibleUpgrade.await().value)
++        assertEquals("background-frame", backgroundRequest.await().value)
++    }
++
++    @Test
++    fun cancellationResistantOldFlightCannotPublishOverNewRequestForSameKey() = runBlocking {
++        val cache = DeferredThumbnailCache()
++        val scheduler = scheduler(cache)
++        val resource = resource("video-1", version = 10)
++        val size = ThumbnailSize(180, 120)
++        cache.ignoreDecodeCancellation(resource, size, attempt = 1)
++
++        val old = launch(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(resource, "old-source", size, ThumbnailPriority.VISIBLE).collect { }
++        }
++        cache.awaitDecodeStart(resource, size, 1)
++        old.cancelAndJoin()
++        val replacement = async(start = CoroutineStart.UNDISPATCHED) {
++            scheduler.request(resource, "new-source", size, ThumbnailPriority.VISIBLE).single()
++        }
++        cache.awaitDecodeStart(resource, size, 2)
++        cache.completeDecode(resource, size, 2, "new-frame")
++        assertEquals("new-frame", replacement.await().value)
++
++        cache.completeDecode(resource, size, 1, "stale-frame")
++        cache.awaitDecodeCompletion(resource, size, 1)
++
++        assertEquals(listOf("new-frame"), cache.memoryWrites.map { it.value })
++    }
++
++    @Test
++    fun scrollControllerForwardsGridScrollStateToSchedulerProvider() {
++        val calls = mutableListOf<Boolean>()
++        val controller = ThumbnailScrollController { calls += it }
++
++        controller.onScrollInProgressChanged(true)
++        controller.onScrollInProgressChanged(true)
++        controller.onScrollInProgressChanged(false)
++
++        assertEquals(listOf(true, false), calls)
++    }
++
++    private fun resource(name: String, version: Long) = ThumbnailResourceIdentity(
++        storageKey = "file:/$name.mp4",
++        uri = "content://media/external/video/$name",
++        dateModified = version
++    )
++
++    private fun scheduler(cache: DeferredThumbnailCache): ThumbnailScheduler<String, String> =
++        ThumbnailScheduler(
++            cache = cache,
++            scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
++            decodeWorkerCount = 1
++        )
++
++    private class DeferredThumbnailCache : ThumbnailCache<String, String> {
++        val memory = mutableMapOf<ThumbnailKey, String>()
++        val disk = mutableMapOf<ThumbnailKey, String>()
++        val decodeStarts = mutableListOf<DecodeStart>()
++        val memoryWrites = mutableListOf<MemoryWrite>()
++        private var memoryLookups = 0
++        private var diskCompletions = 0
++        private val diskStarted = mutableMapOf<ThumbnailKey, CompletableDeferred<Unit>>()
++        private val delayedDisk = mutableMapOf<ThumbnailKey, CompletableDeferred<String?>>()
++        private val decodeStarted = mutableMapOf<DecodeAttempt, CompletableDeferred<Unit>>()
++        private val decodeResults = mutableMapOf<DecodeAttempt, CompletableDeferred<String?>>()
++        private val decodeCompletions = mutableMapOf<DecodeAttempt, CompletableDeferred<Unit>>()
++        private val cancellationResistantAttempts = mutableSetOf<DecodeAttempt>()
++
++        override suspend fun loadMemory(key: ThumbnailKey): String? = synchronized(this) {
++            memoryLookups++
++            memory[key]
++        }
++
++        override suspend fun loadDisk(key: ThumbnailKey): String? {
++            val delayed = synchronized(this) {
++                diskStarted.getOrPut(key) { CompletableDeferred() }.complete(Unit)
++                delayedDisk[key]
++            }
++            return (delayed?.await() ?: synchronized(this) { disk[key] }).also {
++                synchronized(this) { diskCompletions++ }
++            }
++        }
++
++        override suspend fun decode(key: ThumbnailKey, source: String): String? {
++            val attempt = synchronized(this) {
++                val next = decodeStarts.count { it.key == key } + 1
++                DecodeAttempt(key, next).also {
++                    decodeStarts += DecodeStart(it.key, source)
++                    decodeStarted.getOrPut(it) { CompletableDeferred() }.complete(Unit)
++                }
++            }
++            val result = synchronized(this) { decodeResults.getOrPut(attempt) { CompletableDeferred() } }
++            return try {
++                if (attempt in cancellationResistantAttempts) {
++                    withContext(NonCancellable) { result.await() }
++                } else {
++                    result.await()
++                }
++            } finally {
++                synchronized(this) { decodeCompletions.getOrPut(attempt) { CompletableDeferred() }.complete(Unit) }
++            }
++        }
++
++        override suspend fun putMemory(key: ThumbnailKey, value: String) {
++            synchronized(this) {
++                memory[key] = value
++                memoryWrites += MemoryWrite(key, value)
++            }
++        }
++
++        override suspend fun writeDisk(key: ThumbnailKey, value: String) = Unit
++
++        fun delayDisk(resource: ThumbnailResourceIdentity, size: ThumbnailSize) {
++            synchronized(this) { delayedDisk[ThumbnailKey(resource, size)] = CompletableDeferred() }
++        }
++
++        fun completeDisk(resource: ThumbnailResourceIdentity, size: ThumbnailSize, value: String?) {
++            synchronized(this) { delayedDisk.getValue(ThumbnailKey(resource, size)).complete(value) }
++        }
++
++        fun ignoreDecodeCancellation(resource: ThumbnailResourceIdentity, size: ThumbnailSize, attempt: Int) {
++            synchronized(this) { cancellationResistantAttempts += DecodeAttempt(ThumbnailKey(resource, size), attempt) }
++        }
++
++        suspend fun awaitDiskStart(resource: ThumbnailResourceIdentity, size: ThumbnailSize) {
++            withTimeout(1_000) { synchronized(this) { diskStarted.getOrPut(ThumbnailKey(resource, size)) { CompletableDeferred() } }.await() }
++        }
++
++        suspend fun awaitMemoryLookups(count: Int) {
++            withTimeout(1_000) {
++                while (synchronized(this) { memoryLookups } < count) kotlinx.coroutines.yield()
++            }
++        }
++
++        suspend fun awaitDiskCompletions(count: Int) {
++            withTimeout(1_000) {
++                while (synchronized(this) { diskCompletions } < count) kotlinx.coroutines.yield()
++            }
++        }
++
++        suspend fun awaitDecodeStart(resource: ThumbnailResourceIdentity, size: ThumbnailSize, attempt: Int) {
++            withTimeout(1_000) { synchronized(this) { decodeStarted.getOrPut(DecodeAttempt(ThumbnailKey(resource, size), attempt)) { CompletableDeferred() } }.await() }
++        }
++
++        suspend fun awaitDecodeCompletion(resource: ThumbnailResourceIdentity, size: ThumbnailSize, attempt: Int) {
++            withTimeout(1_000) { synchronized(this) { decodeCompletions.getOrPut(DecodeAttempt(ThumbnailKey(resource, size), attempt)) { CompletableDeferred() } }.await() }
++        }
++
++        fun completeDecode(resource: ThumbnailResourceIdentity, size: ThumbnailSize, attempt: Int, value: String) {
++            val decodeAttempt = DecodeAttempt(ThumbnailKey(resource, size), attempt)
++            synchronized(this) { decodeResults.getOrPut(decodeAttempt) { CompletableDeferred() }.complete(value) }
++        }
++    }
++
++    private data class DecodeStart(val key: ThumbnailKey, val source: String)
++    private data class DecodeAttempt(val key: ThumbnailKey, val attempt: Int)
++    private data class MemoryWrite(val key: ThumbnailKey, val value: String)
++}

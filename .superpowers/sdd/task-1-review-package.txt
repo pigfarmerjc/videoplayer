@@ -1,0 +1,1450 @@
+﻿COMMITS
+4dd4877 refactor: focus library on video and photos
+STAT
+ app/src/main/AndroidManifest.xml                   |   1 -
+ .../java/com/example/videoplayer/MainActivity.kt   |  38 +-
+ .../videoplayer/data/repository/MediaRepository.kt |  51 +--
+ .../example/videoplayer/ui/components/MediaGrid.kt |   1 -
+ .../videoplayer/ui/screens/AudioPlayerScreen.kt    | 472 ---------------------
+ .../example/videoplayer/ui/screens/MainScreen.kt   | 132 ++----
+ .../videoplayer/ProductSurfaceContractTest.kt      |  20 +
+ 7 files changed, 47 insertions(+), 668 deletions(-)
+DIFF
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 4a31fd6..848c1bf 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -1,20 +1,19 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ 
+     <!-- Storage permissions for reading local media & SD/TF cards -->
+     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+     
+     <!-- Granular media permissions for Android 13+ (API 33+) -->
+     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+     
+     <!-- Service and Notification Permissions -->
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+     
+     <!-- Network and casting permissions -->
+     <uses-permission android:name="android.permission.INTERNET" />
+diff --git a/app/src/main/java/com/example/videoplayer/MainActivity.kt b/app/src/main/java/com/example/videoplayer/MainActivity.kt
+index 3bf3944..98974ba 100644
+--- a/app/src/main/java/com/example/videoplayer/MainActivity.kt
++++ b/app/src/main/java/com/example/videoplayer/MainActivity.kt
+@@ -138,23 +138,20 @@ class MainActivity : ComponentActivity() {
+                                 repository = repository,
+                                 selectedTab = mainSelectedTab.intValue,
+                                 onSelectedTabChange = { mainSelectedTab.intValue = it },
+                                 onNavigateToFolder = { folderName ->
+                                     navController.navigate("folder/${Uri.encode(folderName)}")
+                                 },
+                                 onNavigateToVideo = { itemId, folderName ->
+                                     activeVideoItemId = itemId
+                                     activeVideoFolderName = folderName
+                                 },
+-                                onNavigateToAudio = { itemId, folderName ->
+-                                    navController.navigate("audio/$itemId/${Uri.encode(folderName)}")
+-                                },
+                                 onNavigateToPhoto = { itemId, folderName ->
+                                     navController.navigate("photo/$itemId/${Uri.encode(folderName)}")
+                                 },
+                                 onNavigateToSettings = {
+                                     navController.navigate("settings")
+                                 },
+                                 onMediaItemsLoaded = { mediaItemsState.value = it }
+                             )
+                         }
+ 
+@@ -203,62 +200,29 @@ class MainActivity : ComponentActivity() {
+                             val folderName = backStackEntry.arguments?.getString("folderName") ?: ""
+                             FolderDetailScreen(
+                                 folderName = folderName,
+                                 mediaItems = mediaItemsState.value,
+                                 repository = repository,
+                                 onBackClick = { navController.popBackStack() },
+                                 onNavigateToVideo = { itemId, fName ->
+                                     activeVideoItemId = itemId
+                                     activeVideoFolderName = fName
+                                 },
+-                                onNavigateToAudio = { itemId, fName ->
+-                                    navController.navigate("audio/$itemId/${Uri.encode(fName)}")
+-                                },
++                                onNavigateToAudio = { _, _ -> },
+                                 onNavigateToPhoto = { itemId, fName ->
+                                     navController.navigate("photo/$itemId/${Uri.encode(fName)}")
+                                 }
+                             )
+                         }
+ 
+ 
+ 
+-                        // Futuristic Equalized Audio Screen (Fade & Scale)
+-                        composable(
+-                            route = "audio/{itemId}/{folderName}",
+-                            arguments = listOf(
+-                                navArgument("itemId") { type = NavType.LongType },
+-                                navArgument("folderName") { type = NavType.StringType }
+-                            ),
+-                            enterTransition = {
+-                                fadeIn(animationSpec = fadeTween) + scaleIn(initialScale = 0.94f, animationSpec = scaleTween)
+-                            },
+-                            exitTransition = {
+-                                fadeOut(animationSpec = fadeTween) + scaleOut(targetScale = 0.94f, animationSpec = scaleTween)
+-                            },
+-                            popEnterTransition = {
+-                                fadeIn(animationSpec = fadeTween)
+-                            },
+-                            popExitTransition = {
+-                                fadeOut(animationSpec = fadeTween) + scaleOut(targetScale = 0.94f, animationSpec = scaleTween)
+-                            }
+-                        ) { backStackEntry ->
+-                            val itemId = backStackEntry.arguments?.getLong("itemId") ?: 0L
+-                            val folderName = backStackEntry.arguments?.getString("folderName") ?: ""
+-                            AudioPlayerScreen(
+-                                itemId = itemId,
+-                                folderName = folderName,
+-                                mediaItems = mediaItemsState.value,
+-                                repository = repository,
+-                                onBackClick = { navController.popBackStack() }
+-                            )
+-                        }
+-
+                         // Pinch Zoom Gallery View (Fade & Scale)
+                         composable(
+                             route = "photo/{itemId}/{folderName}",
+                             arguments = listOf(
+                                 navArgument("itemId") { type = NavType.LongType },
+                                 navArgument("folderName") { type = NavType.StringType }
+                             ),
+                             enterTransition = {
+                                 fadeIn(animationSpec = fadeTween) + scaleIn(initialScale = 0.94f, animationSpec = scaleTween)
+                             },
+diff --git a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+index bd24354..674e5ac 100644
+--- a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
++++ b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+@@ -25,70 +25,63 @@ class MediaRepository(private val context: Context) {
+     @Volatile private var cachedPlaylistKeys: Set<String>? = null
+     @Volatile private var cachedWatchedKeys: Set<String>? = null
+     // key = uniqueKey, value = last_played_at timestamp ms
+     @Volatile private var cachedLastPlayedMap: Map<String, Long>? = null
+     // Folder 列表缓存：5 秒 TTL，避免 toggleFavorite 频繁触发重算
+     @Volatile private var cachedFolders: List<MediaFolder>? = null
+     @Volatile private var cachedFoldersAtMs: Long = 0L
+ 
+     companion object {
+         const val ALL_VIDEOS = "ALL_VIDEOS"
+-        const val ALL_AUDIOS = "ALL_AUDIOS"
+         const val ALL_PHOTOS = "ALL_PHOTOS"
+         const val INTERNAL_VIDEOS = "INTERNAL_VIDEOS"
+         const val TF_CARD_VIDEOS = "TF_CARD_VIDEOS"
+         const val FAVORITES = "FAVORITES"
+         const val RECENT_PLAYED = "RECENT_PLAYED"
+         const val RECENT_ADDED = "RECENT_ADDED"
+         const val PLAYLIST = "PLAYLIST"
+ 
+         private val videoExtensions = setOf(
+             "mp4", "m4v", "mkv", "webm", "avi", "3gp", "3g2", "ts", "m2ts", "mts",
+             "mov", "flv", "mpg", "mpeg", "vob", "wmv", "asf", "iso"
+         )
+-        private val audioExtensions = setOf(
+-            "mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "alac",
+-            "ape", "amr", "ac3", "eac3", "dts", "mka", "wma", "mid", "midi"
+-        )
+         private val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif")
+         private const val MEDIA_CACHE_TTL_MS = 10 * 60 * 1000L
+         private const val FOLDER_CACHE_TTL_MS = 5_000L
+     }
+ 
+     fun hasFreshMediaCache(): Boolean {
+         val now = System.currentTimeMillis()
+         return cachedItems != null && now - cachedAtMs < MEDIA_CACHE_TTL_MS
+     }
+ 
+     suspend fun scanMedia(forceRefresh: Boolean = false): List<MediaItem> = withContext(Dispatchers.IO) {
+         val now = System.currentTimeMillis()
+         cachedItems?.takeIf { !forceRefresh && now - cachedAtMs < MEDIA_CACHE_TTL_MS }?.let { return@withContext it }
+ 
+         val interner = StringInterner()
+         val items = linkedMapOf<String, MediaItem>()
+         val videosDeferred = async { scanVideos(interner) }
+         val isoDeferred = async { scanIsoFiles(interner) }
+-        val audiosDeferred = async { scanAudios(interner) }
+         val imagesDeferred = async { scanImages(interner) }
+ 
+         videosDeferred.await().forEach { items[it.uniqueKey] = it }
+         isoDeferred.await().forEach { items[it.uniqueKey] = it }
+-        audiosDeferred.await().forEach { items[it.uniqueKey] = it }
+         imagesDeferred.await().forEach { items[it.uniqueKey] = it }
+ 
+         if (forceRefresh) {
+             scanPhysicalRoots(items, interner)
+         }
+ 
+         val allPrefs = prefs.all
+         items.values.map { item ->
+-            if (item.type == MediaType.VIDEO || item.type == MediaType.AUDIO) {
++            if (item.type == MediaType.VIDEO) {
+                 val savedDuration = (allPrefs["duration:${item.uniqueKey}"] as? Long) ?: 0L
+                 val savedResolution = allPrefs["resolution:${item.uniqueKey}"] as? String
+                 if (savedDuration > 0L || !savedResolution.isNullOrBlank()) {
+                     item.copy(
+                         duration = if (savedDuration > 0L) savedDuration else item.duration,
+                         resolution = if (!savedResolution.isNullOrBlank()) savedResolution else item.resolution
+                     )
+                 } else {
+                     item
+                 }
+@@ -109,21 +102,20 @@ class MediaRepository(private val context: Context) {
+         cachedFolders?.takeIf { now - cachedFoldersAtMs < FOLDER_CACHE_TTL_MS }?.let { return@withContext it }
+         buildFolders(items).also {
+             cachedFolders = it
+             cachedFoldersAtMs = now
+         }
+     }
+ 
+     fun resolveFolderItems(folderName: String, items: List<MediaItem>): List<MediaItem> {
+         val resolved = when (folderName) {
+             ALL_VIDEOS -> items.filter { it.type == MediaType.VIDEO }
+-            ALL_AUDIOS -> items.filter { it.type == MediaType.AUDIO }
+             ALL_PHOTOS -> items.filter { it.type == MediaType.PHOTO }
+             INTERNAL_VIDEOS -> items.filter { it.type == MediaType.VIDEO && isInternalPath(it.path) }
+             TF_CARD_VIDEOS -> items.filter { it.type == MediaType.VIDEO && !isInternalPath(it.path) }
+             FAVORITES -> favoriteItems(items)
+             RECENT_PLAYED -> recentPlayedItems(items)
+             RECENT_ADDED -> recentAddedItems(items)
+             PLAYLIST -> playlistItems(items)
+             else -> items.filter { it.folderName == folderName }
+         }
+         return if (folderName == RECENT_PLAYED || folderName == PLAYLIST) resolved else resolved.sortedByDescending { it.dateAdded }
+@@ -341,26 +333,20 @@ class MediaRepository(private val context: Context) {
+     }
+ 
+     fun getGalleryColumnCount(): Int {
+         return prefs.getInt("gallery_column_count", 4).coerceIn(2, 12)
+     }
+ 
+     fun setGalleryColumnCount(count: Int) {
+         prefs.edit().putInt("gallery_column_count", count.coerceIn(2, 12)).apply()
+     }
+ 
+-    fun isAudioGridModeEnabled(): Boolean = prefs.getBoolean("audio_grid_mode", false)
+-
+-    fun setAudioGridModeEnabled(enabled: Boolean) {
+-        prefs.edit().putBoolean("audio_grid_mode", enabled).apply()
+-    }
+-
+     // 视频网格尺寸：140 = 小，220 = 中，320 = 大
+     fun getVideoGridSize(): Int = prefs.getInt("video_grid_size", 220).let {
+         if (it in setOf(140, 220, 320)) it else 220
+     }
+ 
+     fun setVideoGridSize(dp: Int) {
+         prefs.edit().putInt("video_grid_size", dp).apply()
+     }
+ 
+     // 文件夹网格尺寸：140 = 小，220 = 中，320 = 大
+@@ -466,46 +452,44 @@ class MediaRepository(private val context: Context) {
+         return prefs.getString("last_viewed:$folderName", "") ?: ""
+     }
+ 
+     fun lastViewedIndex(folderName: String, items: List<MediaItem>): Int {
+         val key = prefs.getString("last_viewed:$folderName", "") ?: ""
+         return items.indexOfFirst { it.uniqueKey == key }.coerceAtLeast(0)
+     }
+ 
+     private fun buildFolders(items: List<MediaItem>): List<MediaFolder> {
+         val videos = mutableListOf<MediaItem>()
+-        val audios = mutableListOf<MediaItem>()
+         val photos = mutableListOf<MediaItem>()
+         val physicalMap = mutableMapOf<String, MutableList<MediaItem>>()
+ 
+         items.forEach { item ->
+             when (item.type) {
+                 MediaType.VIDEO -> videos.add(item)
+-                MediaType.AUDIO -> audios.add(item)
++                MediaType.AUDIO -> Unit
+                 MediaType.PHOTO -> photos.add(item)
+             }
+             // Use folderName as key for grouping
+             physicalMap.getOrPut(item.folderName) { mutableListOf() }.add(item)
+         }
+ 
+         val folders = mutableListOf<MediaFolder>()
+         
+         // 1. All Media Virtual Folders
+         if (videos.isNotEmpty()) folders.add(MediaFolder(ALL_VIDEOS, "All Videos", videos))
+         
+         val internalVideos = videos.filter { isInternalPath(it.path) }
+         if (internalVideos.isNotEmpty()) folders.add(MediaFolder(INTERNAL_VIDEOS, "Internal Videos", internalVideos))
+         
+         val tfVideos = videos.filter { !isInternalPath(it.path) }
+         if (tfVideos.isNotEmpty()) folders.add(MediaFolder(TF_CARD_VIDEOS, "SD Card Videos", tfVideos))
+         
+-        if (audios.isNotEmpty()) folders.add(MediaFolder(ALL_AUDIOS, "All Audios", audios))
+         if (photos.isNotEmpty()) folders.add(MediaFolder(ALL_PHOTOS, "All Photos", photos))
+         
+         // 2. Specialized Virtual Folders
+         val recentPlayed = recentPlayedItems(items)
+         if (recentPlayed.isNotEmpty()) folders.add(MediaFolder(RECENT_PLAYED, "Recently Played", recentPlayed))
+         
+         val recentAdded = recentAddedItems(items)
+         if (recentAdded.isNotEmpty()) folders.add(MediaFolder(RECENT_ADDED, "Recently Added", recentAdded))
+         
+         val playlist = playlistItems(items)
+@@ -638,50 +622,20 @@ class MediaRepository(private val context: Context) {
+                 folderName = getParentFolderName(path, interner),
+                 size = cursor.getLong(MediaStore.Files.FileColumns.SIZE),
+                 dateAdded = cursor.getLong(MediaStore.Files.FileColumns.DATE_ADDED),
+                 duration = 0L,
+                 resolution = "",
+                 type = MediaType.VIDEO
+             )
+         }
+     }
+ 
+-    private fun scanAudios(interner: StringInterner): List<MediaItem> {
+-        val projection = arrayOf(
+-            MediaStore.Audio.Media._ID,
+-            MediaStore.Audio.Media.DISPLAY_NAME,
+-            MediaStore.Audio.Media.TITLE,
+-            MediaStore.Audio.Media.DATA,
+-            MediaStore.Audio.Media.SIZE,
+-            MediaStore.Audio.Media.DATE_ADDED,
+-            MediaStore.Audio.Media.DURATION,
+-            MediaStore.Audio.Media.ARTIST
+-        )
+-        return query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, projection) { cursor ->
+-            val id = cursor.getLong(MediaStore.Audio.Media._ID)
+-            val path = cursor.getStringOrEmpty(MediaStore.Audio.Media.DATA)
+-            MediaItem(
+-                id = id,
+-                uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id),
+-                title = cursor.getStringOrEmpty(MediaStore.Audio.Media.TITLE).ifEmpty { cursor.getStringOrEmpty(MediaStore.Audio.Media.DISPLAY_NAME) },
+-                displayName = cursor.getStringOrEmpty(MediaStore.Audio.Media.DISPLAY_NAME).ifEmpty { "Unknown audio" },
+-                path = path,
+-                folderName = getParentFolderName(path, interner),
+-                size = cursor.getLong(MediaStore.Audio.Media.SIZE),
+-                dateAdded = cursor.getLong(MediaStore.Audio.Media.DATE_ADDED),
+-                duration = cursor.getLong(MediaStore.Audio.Media.DURATION),
+-                type = MediaType.AUDIO,
+-                artist = interner.intern(cursor.getStringOrEmpty(MediaStore.Audio.Media.ARTIST).ifEmpty { "Unknown Artist" })
+-            )
+-        }
+-    }
+-
+     private fun scanImages(interner: StringInterner): List<MediaItem> {
+         val projection = arrayOf(
+             MediaStore.Images.Media._ID,
+             MediaStore.Images.Media.DISPLAY_NAME,
+             MediaStore.Images.Media.TITLE,
+             MediaStore.Images.Media.DATA,
+             MediaStore.Images.Media.SIZE,
+             MediaStore.Images.Media.DATE_ADDED
+         )
+         return query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, projection) { cursor ->
+@@ -717,21 +671,20 @@ class MediaRepository(private val context: Context) {
+         }
+         return list
+     }
+ 
+     private fun isInternalPath(path: String): Boolean {
+         return path.startsWith("/storage/emulated") || path.startsWith("/sdcard")
+     }
+ 
+     private fun typeFromExtension(ext: String): MediaType? = when (ext) {
+         in videoExtensions -> MediaType.VIDEO
+-        in audioExtensions -> MediaType.AUDIO
+         in imageExtensions -> MediaType.PHOTO
+         else -> null
+     }
+ 
+     private fun getParentFolderName(path: String, interner: StringInterner? = null): String {
+         val name = runCatching { File(path).parentFile?.name }
+             .getOrNull()
+             ?.takeIf { it.isNotBlank() }
+             ?: "Storage"
+         return interner?.intern(name) ?: name
+diff --git a/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt b/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt
+index 83ca1ef..2e8d8c6 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/components/MediaGrid.kt
+@@ -735,21 +735,20 @@ fun FolderGridTile(
+                     fontSize = 10.sp,
+                     fontWeight = FontWeight.Bold
+                 )
+             }
+         }
+     }
+ }
+ 
+ fun folderDisplayName(name: String): String = when (name) {
+     MediaRepository.ALL_VIDEOS -> "全部视频"
+-    MediaRepository.ALL_AUDIOS -> "全部音频"
+     MediaRepository.ALL_PHOTOS -> "全部照片"
+     MediaRepository.INTERNAL_VIDEOS -> "本机视频"
+     MediaRepository.TF_CARD_VIDEOS -> "TF 卡视频"
+     MediaRepository.RECENT_PLAYED -> "最近播放"
+     MediaRepository.RECENT_ADDED -> "最近添加"
+     MediaRepository.FAVORITES -> "收藏夹"
+     else -> name
+ }
+ 
+ @Composable
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/AudioPlayerScreen.kt b/app/src/main/java/com/example/videoplayer/ui/screens/AudioPlayerScreen.kt
+deleted file mode 100644
+index 77bada5..0000000
+--- a/app/src/main/java/com/example/videoplayer/ui/screens/AudioPlayerScreen.kt
++++ /dev/null
+@@ -1,472 +0,0 @@
+-package com.example.videoplayer.ui.screens
+-
+-import androidx.compose.animation.core.LinearEasing
+-import androidx.compose.animation.core.RepeatMode
+-import androidx.compose.animation.core.animateFloat
+-import androidx.compose.animation.core.infiniteRepeatable
+-import androidx.compose.animation.core.rememberInfiniteTransition
+-import androidx.compose.animation.core.tween
+-import androidx.compose.foundation.background
+-import androidx.compose.foundation.border
+-import androidx.compose.foundation.layout.*
+-import androidx.compose.foundation.shape.CircleShape
+-import androidx.compose.foundation.shape.RoundedCornerShape
+-import androidx.compose.material.icons.Icons
+-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+-import androidx.compose.material.icons.filled.MoreVert
+-import androidx.compose.material.icons.filled.MusicNote
+-import androidx.compose.material.icons.filled.Pause
+-import androidx.compose.material.icons.filled.PlayArrow
+-import androidx.compose.material.icons.filled.Schedule
+-import androidx.compose.material.icons.filled.SkipNext
+-import androidx.compose.material.icons.filled.SkipPrevious
+-import androidx.compose.material3.*
+-import androidx.compose.ui.graphics.graphicsLayer
+-import androidx.compose.runtime.*
+-import androidx.compose.ui.Alignment
+-import androidx.compose.ui.Modifier
+-import androidx.compose.ui.draw.clip
+-import androidx.compose.ui.graphics.Brush
+-import androidx.compose.ui.graphics.Color
+-import androidx.compose.ui.platform.LocalContext
+-import androidx.compose.ui.text.font.FontWeight
+-import androidx.compose.ui.text.style.TextOverflow
+-import androidx.compose.ui.unit.dp
+-import androidx.compose.ui.unit.sp
+-import androidx.media3.common.AudioAttributes
+-import androidx.media3.common.C
+-import androidx.media3.common.MediaItem
+-import androidx.media3.common.Player
+-import androidx.media3.common.util.UnstableApi
+-import androidx.media3.exoplayer.DefaultRenderersFactory
+-import androidx.media3.exoplayer.ExoPlayer
+-import com.example.videoplayer.data.model.MediaItem as PlayerMediaItem
+-import com.example.videoplayer.data.model.MediaType
+-import com.example.videoplayer.data.repository.MediaRepository
+-import com.example.videoplayer.ui.components.formatDuration
+-import com.example.videoplayer.ui.components.bounceClick
+-import com.example.videoplayer.ui.theme.*
+-import kotlinx.coroutines.delay
+-
+-@OptIn(ExperimentalMaterial3Api::class)
+-@Composable
+-fun AudioPlayerScreen(
+-    itemId: Long,
+-    folderName: String,
+-    mediaItems: List<PlayerMediaItem>,
+-    repository: MediaRepository,
+-    onBackClick: () -> Unit
+-) {
+-    val context = LocalContext.current
+-    val playlist = remember(folderName, mediaItems) {
+-        repository.resolveFolderItems(folderName, mediaItems).filter { it.type == MediaType.AUDIO }
+-    }
+-    var currentIndex by remember { mutableIntStateOf(playlist.indexOfFirst { it.id == itemId }.coerceAtLeast(0)) }
+-    val currentAudio = playlist.getOrNull(currentIndex)
+-
+-    if (currentAudio == null) {
+-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+-            Text("未找到该音频", color = Color.White)
+-        }
+-        return
+-    }
+-
+-    var player by remember { mutableStateOf<ExoPlayer?>(null) }
+-    var isPlaying by remember { mutableStateOf(false) }
+-    var currentPosition by remember { mutableLongStateOf(0L) }
+-    var duration by remember { mutableLongStateOf(0L) }
+-
+-    // Vinyl record rotation — uses infiniteTransition so Compose can skip recomposition
+-    // when not playing; the animation pauses automatically via targetValue.
+-    val infiniteTransition = rememberInfiniteTransition(label = "vinyl")
+-    val infiniteAngle by infiniteTransition.animateFloat(
+-        initialValue = 0f,
+-        targetValue = 360f,
+-        animationSpec = infiniteRepeatable(
+-            animation = tween(durationMillis = 6000, easing = LinearEasing),
+-            repeatMode = RepeatMode.Restart
+-        ),
+-        label = "vinylRotation"
+-    )
+-    // When paused, freeze the last angle; when playing, advance with the infinite transition.
+-    var frozenAngle by remember { mutableFloatStateOf(0f) }
+-    LaunchedEffect(isPlaying) { if (!isPlaying) frozenAngle = infiniteAngle }
+-    val rotationAngle = if (isPlaying) infiniteAngle else frozenAngle
+-
+-    // Sleep Timer: single-step countdown — avoids nested while loop inside LaunchedEffect.
+-    var sleepTimerSecondsLeft by remember { mutableIntStateOf(0) }
+-    var sleepTimerVersion by remember { mutableIntStateOf(0) }
+-    LaunchedEffect(sleepTimerSecondsLeft, isPlaying, sleepTimerVersion) {
+-        if (sleepTimerSecondsLeft > 0 && isPlaying) {
+-            delay(1000L)
+-            sleepTimerSecondsLeft--
+-            if (sleepTimerSecondsLeft == 0) {
+-                player?.pause()
+-            }
+-        }
+-    }
+-
+-    var showMenu by remember { mutableStateOf(false) }
+-    var showTimerDialog by remember { mutableStateOf(false) }
+-
+-    fun playNext() {
+-        repository.savePlaybackProgress(currentAudio, currentPosition, duration)
+-        if (currentIndex < playlist.lastIndex) {
+-            currentIndex++
+-        }
+-    }
+-
+-    fun playPrev() {
+-        repository.savePlaybackProgress(currentAudio, currentPosition, duration)
+-        if (currentIndex > 0) {
+-            currentIndex--
+-        }
+-    }
+-
+-    LaunchedEffect(currentAudio) {
+-        repository.markLastViewed(folderName, currentAudio)
+-        val renderersFactory = DefaultRenderersFactory(context)
+-            .setEnableDecoderFallback(true)
+-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+-        // Configure audio focus and noisy-audio handling per skill guidelines:
+-        // - handleAudioFocus=true: pauses on transient focus loss (phone calls, other apps)
+-        // - setHandleAudioBecomingNoisy: auto-pauses when headphones are unplugged
+-        val audioAttrs = AudioAttributes.Builder()
+-            .setUsage(C.USAGE_MEDIA)
+-            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+-            .build()
+-        val exoPlayer = ExoPlayer.Builder(context)
+-            .setRenderersFactory(renderersFactory)
+-            .setAudioAttributes(audioAttrs, /* handleAudioFocus= */ true)
+-            .setHandleAudioBecomingNoisy(true)
+-            .build()
+-            .apply {
+-                setMediaItem(MediaItem.fromUri(currentAudio.uri))
+-                prepare()
+-                val savedPosition = repository.getPlaybackPosition(currentAudio)
+-                if (savedPosition > 0L && (currentAudio.duration <= 0L || savedPosition < currentAudio.duration * 0.98f)) {
+-                    seekTo(savedPosition)
+-                    currentPosition = savedPosition
+-                }
+-                playWhenReady = true
+-            }
+-        player = exoPlayer
+-        val listener = object : Player.Listener {
+-            override fun onIsPlayingChanged(playing: Boolean) {
+-                isPlaying = playing
+-            }
+-
+-            override fun onPlaybackStateChanged(state: Int) {
+-                if (state == Player.STATE_READY) duration = exoPlayer.duration.coerceAtLeast(0L)
+-                if (state == Player.STATE_ENDED) playNext()
+-            }
+-        }
+-        exoPlayer.addListener(listener)
+-        try {
+-            var lastProgressSaveAtMs = 0L
+-            while (true) {
+-                currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+-                if (duration <= 0) duration = exoPlayer.duration.coerceAtLeast(0L)
+-                val now = System.currentTimeMillis()
+-                // Save progress every 2s; poll position at 200ms for smooth slider updates.
+-                if (now - lastProgressSaveAtMs >= 2000L) {
+-                    repository.savePlaybackProgress(currentAudio, currentPosition, duration)
+-                    lastProgressSaveAtMs = now
+-                }
+-                delay(200)
+-            }
+-        } finally {
+-            exoPlayer.removeListener(listener)
+-            if (player === exoPlayer) player = null
+-            exoPlayer.release()
+-        }
+-    }
+-
+-    Box(
+-        modifier = Modifier
+-            .fillMaxSize()
+-            .background(ObsidianBg)
+-    ) {
+-        // Glowing Neon Background Circle 1
+-        Box(
+-            modifier = Modifier
+-                .size(320.dp)
+-                .align(Alignment.TopStart)
+-                .offset(x = (-80).dp, y = (-80).dp)
+-                .background(
+-                    Brush.radialGradient(
+-                        colors = listOf(PrimaryNeonPurple.copy(alpha = 0.18f), Color.Transparent)
+-                    )
+-                )
+-        )
+-        // Glowing Neon Background Circle 2
+-        Box(
+-            modifier = Modifier
+-                .size(360.dp)
+-                .align(Alignment.BottomEnd)
+-                .offset(x = 80.dp, y = 80.dp)
+-                .background(
+-                    Brush.radialGradient(
+-                        colors = listOf(SecondaryNeonCyan.copy(alpha = 0.12f), Color.Transparent)
+-                    )
+-                )
+-        )
+-
+-        Scaffold(
+-            topBar = {
+-                CenterAlignedTopAppBar(
+-                    title = { Text("音频播放", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+-                    navigationIcon = {
+-                        Box(
+-                            modifier = Modifier
+-                                .padding(start = 12.dp)
+-                                .size(40.dp)
+-                                .bounceClick { onBackClick() },
+-                            contentAlignment = Alignment.Center
+-                        ) {
+-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White, modifier = Modifier.size(24.dp))
+-                        }
+-                    },
+-                    actions = {
+-                        Box(
+-                            modifier = Modifier
+-                                .padding(end = 12.dp)
+-                                .size(40.dp)
+-                                .bounceClick { showMenu = true },
+-                            contentAlignment = Alignment.Center
+-                        ) {
+-                            Icon(Icons.Default.MoreVert, contentDescription = "更多", tint = Color.White, modifier = Modifier.size(24.dp))
+-                        }
+-                        DropdownMenu(
+-                            expanded = showMenu,
+-                            onDismissRequest = { showMenu = false },
+-                            modifier = Modifier.background(CardObsidian)
+-                        ) {
+-                            DropdownMenuItem(
+-                                text = { Text("睡眠定时", color = Color.White) },
+-                                onClick = {
+-                                    showMenu = false
+-                                    showTimerDialog = true
+-                                }
+-                            )
+-                        }
+-                    },
+-                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = Color.Transparent)
+-                )
+-            },
+-            containerColor = Color.Transparent
+-        ) { paddingValues ->
+-        Column(
+-            modifier = Modifier
+-                .fillMaxSize()
+-                .padding(paddingValues)
+-                .padding(24.dp),
+-            horizontalAlignment = Alignment.CenterHorizontally,
+-            verticalArrangement = Arrangement.SpaceBetween
+-        ) {
+-            Spacer(Modifier.height(8.dp))
+-            // Vinyl Record Disc
+-            Box(
+-                modifier = Modifier
+-                    .size(250.dp)
+-                    .graphicsLayer(rotationZ = rotationAngle)
+-                    .clip(CircleShape)
+-                    .background(Color(0xFF0F0F13)) // Dark vinyl base
+-                    .border(3.dp, Color(0xFF1E1E24), CircleShape)
+-                    .border(24.dp, Color(0xFF131317), CircleShape),
+-                contentAlignment = Alignment.Center
+-            ) {
+-                // Vinyl grooves (subtle concentric border rings)
+-                Box(
+-                    modifier = Modifier
+-                        .fillMaxSize(0.9f)
+-                        .border(1.dp, Color.White.copy(alpha = 0.03f), CircleShape)
+-                        .border(12.dp, Color.White.copy(alpha = 0.01f), CircleShape)
+-                )
+-                Box(
+-                    modifier = Modifier
+-                        .fillMaxSize(0.75f)
+-                        .border(1.5.dp, Color.White.copy(alpha = 0.04f), CircleShape)
+-                )
+-                Box(
+-                    modifier = Modifier
+-                        .fillMaxSize(0.6f)
+-                        .clip(CircleShape)
+-                        .background(
+-                            Brush.sweepGradient(
+-                                listOf(PrimaryNeonPurple, SecondaryNeonCyan, PrimaryNeonPurple)
+-                            )
+-                        ),
+-                    contentAlignment = Alignment.Center
+-                ) {
+-                    Icon(
+-                        imageVector = Icons.Default.MusicNote,
+-                        contentDescription = null,
+-                        tint = Color.White.copy(alpha = 0.85f),
+-                        modifier = Modifier.size(42.dp)
+-                    )
+-                }
+-                // Spindle hole
+-                Box(
+-                    modifier = Modifier
+-                        .size(16.dp)
+-                        .clip(CircleShape)
+-                        .background(ObsidianBg)
+-                        .border(1.5.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+-                )
+-            }
+-
+-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+-                Text(currentAudio.displayName, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+-                Spacer(Modifier.height(6.dp))
+-                Text(currentAudio.artist.ifBlank { "Unknown Artist" }, color = SecondaryNeonCyan, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+-                if (sleepTimerSecondsLeft > 0) {
+-                    Spacer(Modifier.height(8.dp))
+-                    val mins = sleepTimerSecondsLeft / 60
+-                    val secs = sleepTimerSecondsLeft % 60
+-                    val timerStr = "${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}"
+-                    Row(
+-                        verticalAlignment = Alignment.CenterVertically,
+-                        horizontalArrangement = Arrangement.Center
+-                    ) {
+-                        Icon(
+-                            imageVector = Icons.Default.Schedule,
+-                            contentDescription = "睡眠定时",
+-                            tint = AccentPink,
+-                            modifier = Modifier.size(14.dp)
+-                        )
+-                        Spacer(Modifier.width(4.dp))
+-                        Text(
+-                            text = "睡眠定时: $timerStr",
+-                            color = AccentPink,
+-                            fontSize = 12.sp,
+-                            fontWeight = FontWeight.Medium
+-                        )
+-                    }
+-                }
+-            }
+-
+-            Column(Modifier.fillMaxWidth()) {
+-                var isDragging by remember { mutableStateOf(false) }
+-                var localProgress by remember { mutableFloatStateOf(0f) }
+-                LaunchedEffect(currentPosition) {
+-                    if (!isDragging) {
+-                        localProgress = currentPosition.toFloat()
+-                    }
+-                }
+-                Slider(
+-                    value = localProgress.coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
+-                    onValueChange = {
+-                        isDragging = true
+-                        localProgress = it
+-                    },
+-                    onValueChangeFinished = {
+-                        player?.seekTo(localProgress.toLong())
+-                        currentPosition = localProgress.toLong()
+-                        isDragging = false
+-                    },
+-                    valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
+-                    colors = SliderDefaults.colors(thumbColor = SecondaryNeonCyan, activeTrackColor = SecondaryNeonCyan)
+-                )
+-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+-                    Text(formatDuration(localProgress.toLong()), color = TextSecondary, fontSize = 11.sp)
+-                    Text(formatDuration(duration), color = TextSecondary, fontSize = 11.sp)
+-                }
+-            }
+-
+-            Row(
+-                modifier = Modifier.fillMaxWidth().padding(bottom = 30.dp),
+-                horizontalArrangement = Arrangement.SpaceEvenly,
+-                verticalAlignment = Alignment.CenterVertically
+-            ) {
+-                val canPrev = currentIndex > 0
+-                Box(
+-                    modifier = Modifier
+-                        .size(48.dp)
+-                        .bounceClick(enabled = canPrev) { playPrev() },
+-                    contentAlignment = Alignment.Center
+-                ) {
+-                    Icon(
+-                        imageVector = Icons.Default.SkipPrevious,
+-                        contentDescription = "上一首",
+-                        tint = if (canPrev) Color.White else Color.Gray,
+-                        modifier = Modifier.size(28.dp)
+-                    )
+-                }
+-
+-                Box(
+-                    modifier = Modifier
+-                        .size(68.dp)
+-                        .clip(CircleShape)
+-                        .background(PrimaryNeonPurple)
+-                        .bounceClick { player?.let { if (it.isPlaying) it.pause() else it.play() } },
+-                    contentAlignment = Alignment.Center
+-                ) {
+-                    Icon(
+-                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+-                        contentDescription = "播放",
+-                        tint = Color.White,
+-                        modifier = Modifier.size(36.dp)
+-                    )
+-                }
+-
+-                val canNext = currentIndex < playlist.lastIndex
+-                Box(
+-                    modifier = Modifier
+-                        .size(48.dp)
+-                        .bounceClick(enabled = canNext) { playNext() },
+-                    contentAlignment = Alignment.Center
+-                ) {
+-                    Icon(
+-                        imageVector = Icons.Default.SkipNext,
+-                        contentDescription = "下一首",
+-                        tint = if (canNext) Color.White else Color.Gray,
+-                        modifier = Modifier.size(28.dp)
+-                    )
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-    if (showTimerDialog) {
+-        AlertDialog(
+-            onDismissRequest = { showTimerDialog = false },
+-            title = { Text("睡眠定时", color = Color.White, fontWeight = FontWeight.Bold) },
+-            containerColor = CardObsidian,
+-            text = {
+-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+-                    val options = listOf(
+-                        "不开启定时" to 0,
+-                        "10 分钟" to 10,
+-                        "20 分钟" to 20,
+-                        "30 分钟" to 30,
+-                        "60 分钟" to 60
+-                    )
+-                    options.forEach { (label, mins) ->
+-                        TextButton(
+-                            onClick = {
+-                                sleepTimerSecondsLeft = mins * 60
+-                                sleepTimerVersion++
+-                                showTimerDialog = false
+-                            },
+-                            modifier = Modifier.fillMaxWidth()
+-                        ) {
+-                            Text(
+-                                text = if (mins == 0) label else "$label (${mins}分钟)",
+-                                color = if (sleepTimerSecondsLeft == mins * 60) SecondaryNeonCyan else Color.White,
+-                                fontWeight = if (sleepTimerSecondsLeft == mins * 60) FontWeight.Bold else FontWeight.Normal
+-                            )
+-                        }
+-                    }
+-                }
+-            },
+-            confirmButton = {
+-                TextButton(onClick = { showTimerDialog = false }) {
+-                    Text("取消", color = TextSecondary)
+-                }
+-            },
+-            shape = RoundedCornerShape(18.dp)
+-        )
+-    }
+-}
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+index 9a8e20c..be88c8a 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+@@ -91,49 +91,39 @@ import androidx.compose.ui.geometry.Size
+ import androidx.compose.ui.graphics.drawscope.Stroke
+ import androidx.compose.ui.graphics.drawscope.withTransform
+ 
+ @Composable
+ fun MainScreen(
+     repository: MediaRepository,
+     selectedTab: Int,
+     onSelectedTabChange: (Int) -> Unit,
+     onNavigateToFolder: (String) -> Unit,
+     onNavigateToVideo: (Long, String) -> Unit,
+-    onNavigateToAudio: (Long, String) -> Unit,
+     onNavigateToPhoto: (Long, String) -> Unit,
+     onNavigateToSettings: () -> Unit,
+     onMediaItemsLoaded: (List<MediaItem>) -> Unit = {}
+ ) {
+     val context = LocalContext.current
+     val scope = rememberCoroutineScope()
+     var hasPermission by remember { mutableStateOf(false) }
+     var isStartupLoading by remember { mutableStateOf(!repository.hasFreshMediaCache()) }
+     var isLoading by remember { mutableStateOf(false) }
+     var mediaItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+     var folders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
+-    var searchQuery by remember { mutableStateOf("") }
+-
+-    // 防抖搜索：300ms 延迟后更新过滤
+-    var debouncedQuery by remember { mutableStateOf("") }
+-    LaunchedEffect(searchQuery) {
+-        delay(300)
+-        debouncedQuery = searchQuery
+-    }
+ 
+     var sortMode by remember { mutableStateOf(SortMode.BY_TIME) }
+     var watchedLast by remember { mutableStateOf(repository.isWatchedLastEnabled()) }
+ 
+-    // 网格/列表模式（文件夹、视频 & 音频 Tab 独立保存）
++    // 网格/列表模式（文件夹、视频 Tab 独立保存）
+     var folderGridMode by remember { mutableStateOf(repository.isMainFolderGridModeEnabled()) }
+     var videoLayoutMode by remember { mutableStateOf(repository.getVideoLayoutMode()) }
+     var videoGalleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
+-    var audioGridMode by remember { mutableStateOf(repository.isAudioGridModeEnabled()) }
+     // 视频网格尺寸档位: 140=小, 220=中, 320=大
+     var videoGridSizeDp by remember { mutableIntStateOf(repository.getVideoGridSize()) }
+     // 首次启动显示主界面功能教程
+     var showMainTutorial by remember { mutableStateOf(!repository.isMainTutorialShown()) }
+     var didInitialLoad by remember { mutableStateOf(false) }
+ 
+     // ── 增加生命周期监听与返回刷新 ──
+     val lifecycleOwner = LocalContext.current as? LifecycleOwner
+     var resumeTrigger by remember { mutableIntStateOf(0) }
+     DisposableEffect(lifecycleOwner) {
+@@ -145,21 +135,24 @@ fun MainScreen(
+                     resumeTrigger++
+                 }
+             }
+             lifecycleOwner.lifecycle.addObserver(observer)
+             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+         }
+     }
+ 
+     val requiredPermissions = remember {
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+-            arrayOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.READ_MEDIA_IMAGES)
++            arrayOf(
++                Manifest.permission.READ_MEDIA_VIDEO,
++                Manifest.permission.READ_MEDIA_IMAGES
++            )
+         } else {
+             arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+         }
+     }
+ 
+     suspend fun reload(forceRefresh: Boolean = false) {
+         val showBlockingLoading = forceRefresh || (!didInitialLoad && !repository.hasFreshMediaCache())
+         if (showBlockingLoading) isLoading = true
+         try {
+             val items = repository.scanMedia(forceRefresh)
+@@ -221,60 +214,45 @@ fun MainScreen(
+     }
+ 
+     fun togglePlaylist(item: MediaItem) {
+         repository.setInPlaylist(item, !repository.isInPlaylist(item))
+         scope.launch { folders = repository.getFolders(mediaItems) }
+     }
+ 
+     // ── Offload filtering and sorting to background thread ──
+     var filteredFolders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
+     var filteredVideos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+-    var filteredAudios by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+     var filteredPhotos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+     var filteredFavorites by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+ 
+-    LaunchedEffect(folders, debouncedQuery) {
+-        val result = withContext(Dispatchers.Default) {
+-            if (debouncedQuery.isBlank()) {
+-                folders
+-            } else {
+-                folders.filter {
+-                    it.name.contains(debouncedQuery, ignoreCase = true) ||
+-                        it.path.contains(debouncedQuery, ignoreCase = true) ||
+-                        it.items.any { item -> item.displayName.contains(debouncedQuery, ignoreCase = true) }
+-                }
+-            }
+-        }
+-        filteredFolders = result
++    LaunchedEffect(folders) {
++        filteredFolders = folders
+     }
+ 
+-    LaunchedEffect(mediaItems, debouncedQuery, sortMode, watchedLast, resumeTrigger) {
++    LaunchedEffect(mediaItems, sortMode, watchedLast, resumeTrigger) {
+         val result = withContext(Dispatchers.Default) {
+             val watchedSet = if (watchedLast) repository.watchedKeySnapshot() else emptySet()
+             FilteredMedia(
+-                videos = sortMedia(mediaItems.filter { it.type == MediaType.VIDEO && it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet),
+-                audios = sortMedia(mediaItems.filter { it.type == MediaType.AUDIO && it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet),
+-                photos = sortMedia(mediaItems.filter { it.type == MediaType.PHOTO && it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet),
+-                favorites = sortMedia(repository.favoriteItems(mediaItems).filter { it.displayName.contains(debouncedQuery, true) }, sortMode, watchedLast, watchedSet)
++                videos = sortMedia(mediaItems.filter { it.type == MediaType.VIDEO }, sortMode, watchedLast, watchedSet),
++                photos = sortMedia(mediaItems.filter { it.type == MediaType.PHOTO }, sortMode, watchedLast, watchedSet),
++                favorites = sortMedia(repository.favoriteItems(mediaItems), sortMode, watchedLast, watchedSet)
+             )
+         }
+         filteredVideos = result.videos
+-        filteredAudios = result.audios
+         filteredPhotos = result.photos
+         filteredFavorites = result.favorites
+     }
+ 
+-    val progressItems = remember(selectedTab, filteredVideos, filteredAudios, filteredFavorites) {
++    val progressItems = remember(selectedTab, filteredVideos, filteredFavorites) {
+         when (selectedTab) {
+             1 -> filteredVideos
+-            2 -> filteredAudios
+-            4 -> filteredFavorites
++            3 -> filteredFavorites
+             else -> emptyList()
+         }
+     }
+     var progressSnapshot by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
+     LaunchedEffect(progressItems, resumeTrigger) {
+         // 防抖 500ms：快速切 Tab 时只在稳定后才触发 IO 读
+         delay(500)
+         withContext(Dispatchers.IO) {
+             progressSnapshot = repository.playbackProgressSnapshot(progressItems)
+         }
+@@ -292,40 +270,37 @@ fun MainScreen(
+         ) {
+             Column(
+                 modifier = Modifier
+                     .fillMaxSize()
+                     .padding(horizontal = 16.dp)
+             ) {
+                 Header(
+                     onRefresh = { if (hasPermission) scope.launch { reload(forceRefresh = true) } },
+                     onSettings = onNavigateToSettings
+                 )
+-                SearchBox(searchQuery, onQueryChange = { searchQuery = it })
+                 SortToolbar(
+                     sortMode = sortMode,
+                     onSortModeChange = { sortMode = it },
+                     watchedLast = watchedLast,
+                     onWatchedLastChange = {
+                         watchedLast = it
+                         repository.setWatchedLastEnabled(it)
+                     },
+-                    // 仅文件夹/视频/音频 Tab 显示网格切换按钮
+-                    showLayoutToggle = selectedTab == 0 || selectedTab == 1 || selectedTab == 2,
++                    // 仅文件夹/视频 Tab 显示网格切换按钮
++                    showLayoutToggle = selectedTab == 0 || selectedTab == 1,
+                     currentLayoutMode = when (selectedTab) {
+                         0 -> if (folderGridMode) LayoutMode.GRID else LayoutMode.LIST
+                         1 -> videoLayoutMode
+-                        2 -> if (audioGridMode) LayoutMode.GRID else LayoutMode.LIST
+                         else -> LayoutMode.LIST
+                     },
+                     showSizeToggle = when (selectedTab) {
+                         1 -> videoLayoutMode == LayoutMode.GRID
+-                        2 -> audioGridMode
+                         else -> false
+                     },
+                     currentGridSizeDp = videoGridSizeDp,
+                     onGridSizeChange = { size ->
+                         videoGridSizeDp = size
+                         repository.setVideoGridSize(size)
+                     },
+                     onLayoutModeToggle = {
+                         when (selectedTab) {
+                             0 -> {
+@@ -333,24 +308,20 @@ fun MainScreen(
+                                 repository.setMainFolderGridModeEnabled(folderGridMode)
+                             }
+                             1 -> {
+                                 videoLayoutMode = when (videoLayoutMode) {
+                                     LayoutMode.LIST -> LayoutMode.GRID
+                                     LayoutMode.GRID -> LayoutMode.GALLERY
+                                     LayoutMode.GALLERY -> LayoutMode.LIST
+                                 }
+                                 repository.setVideoLayoutMode(videoLayoutMode)
+                             }
+-                            2 -> {
+-                                audioGridMode = !audioGridMode
+-                                repository.setAudioGridModeEnabled(audioGridMode)
+-                            }
+                         }
+                     }
+                 )
+                 Spacer(modifier = Modifier.height(12.dp))
+ 
+                 when {
+                     !hasPermission -> PermissionView { permissionLauncher.launch(requiredPermissions) }
+                     isStartupLoading || isLoading -> Box(
+                         modifier = Modifier.fillMaxSize().background(CarbonBg),
+                     ) {
+@@ -360,66 +331,50 @@ fun MainScreen(
+                     }
+                     else -> Box(Modifier.weight(1f)) {
+                         when (selectedTab) {
+                             0 -> if (folderGridMode) {
+                                 FolderGridView(filteredFolders, onNavigateToFolder)
+                             } else {
+                                 FolderList(filteredFolders, onNavigateToFolder)
+                             }
+                             1 -> when (videoLayoutMode) {
+                                 LayoutMode.LIST -> {
+-                                    MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
++                                    MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
+                                 }
+                                 LayoutMode.GRID -> {
+                                     MediaGridView(
+                                         items = filteredVideos,
+                                         folderName = MediaRepository.ALL_VIDEOS,
+                                         progressSnapshot = progressSnapshot,
+                                         repository = repository,
+                                         gridSizeDp = videoGridSizeDp,
+                                         onNavigateToVideo = onNavigateToVideo,
+-                                        onNavigateToAudio = onNavigateToAudio,
+                                         onNavigateToPhoto = onNavigateToPhoto
+                                     )
+                                 }
+                                 LayoutMode.GALLERY -> {
+                                     MediaGalleryView(
+                                         items = filteredVideos,
+                                         folderName = MediaRepository.ALL_VIDEOS,
+                                         progressSnapshot = progressSnapshot,
+                                         columnsCount = videoGalleryColumns,
+                                         onColumnsChange = { cols ->
+                                             videoGalleryColumns = cols
+                                             repository.setGalleryColumnCount(cols)
+                                         },
+                                         onNavigateToVideo = onNavigateToVideo,
+-                                        onNavigateToAudio = onNavigateToAudio,
+                                         onNavigateToPhoto = onNavigateToPhoto
+                                     )
+                                 }
+                             }
+-                            2 -> if (audioGridMode) {
+-                                MediaGridView(
+-                                    items = filteredAudios,
+-                                    folderName = MediaRepository.ALL_AUDIOS,
+-                                    progressSnapshot = progressSnapshot,
+-                                    repository = repository,
+-                                    gridSizeDp = videoGridSizeDp,
+-                                    onNavigateToVideo = onNavigateToVideo,
+-                                    onNavigateToAudio = onNavigateToAudio,
+-                                    onNavigateToPhoto = onNavigateToPhoto
+-                                )
+-                            } else {
+-                                MediaList(filteredAudios, MediaRepository.ALL_AUDIOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
+-                            }
+-                            3 -> PhotoGrid(filteredPhotos, onNavigateToPhoto)
+-                            4 -> MediaList(filteredFavorites, MediaRepository.FAVORITES, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToAudio, onNavigateToPhoto)
++                            2 -> PhotoGrid(filteredPhotos, onNavigateToPhoto)
++                            3 -> MediaList(filteredFavorites, MediaRepository.FAVORITES, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
+                         }
+                     }
+                 }
+             }
+ 
+             GlassmorphicBottomNavBar(
+                 selectedTab = selectedTab,
+                 onTabSelected = onSelectedTabChange,
+                 modifier = Modifier.align(Alignment.BottomCenter)
+             )
+@@ -485,54 +440,20 @@ private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
+                     .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+                     .bounceClick { onSettings() },
+                 contentAlignment = Alignment.Center
+             ) {
+                 Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(20.dp))
+             }
+         }
+     }
+ }
+ 
+-@Composable
+-private fun SearchBox(query: String, onQueryChange: (String) -> Unit) {
+-    GlassmorphicCard(
+-        modifier = Modifier
+-            .fillMaxWidth()
+-            .height(50.dp),
+-        cornerRadius = 14.dp,
+-        shadowElevation = 1.dp
+-    ) {
+-        Row(Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+-            Icon(Icons.Default.Search, contentDescription = null, tint = SecondaryNeonCyan, modifier = Modifier.size(20.dp))
+-            Spacer(Modifier.width(10.dp))
+-            TextField(
+-                value = query,
+-                onValueChange = onQueryChange,
+-                placeholder = { Text("搜索视频、音频、图片...", color = TextMuted, fontSize = 14.sp) },
+-                modifier = Modifier.weight(1f),
+-                singleLine = true,
+-                colors = TextFieldDefaults.colors(
+-                    focusedContainerColor = Color.Transparent,
+-                    unfocusedContainerColor = Color.Transparent,
+-                    focusedIndicatorColor = Color.Transparent,
+-                    unfocusedIndicatorColor = Color.Transparent,
+-                    focusedTextColor = Color.White,
+-                    unfocusedTextColor = Color.White
+-                )
+-            )
+-            if (query.isNotEmpty()) {
+-                Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color.White, modifier = Modifier.size(18.dp).clickable { onQueryChange("") })
+-            }
+-        }
+-    }
+-}
+-
+ @Composable
+ private fun SortToolbar(
+     sortMode: SortMode,
+     onSortModeChange: (SortMode) -> Unit,
+     watchedLast: Boolean,
+     onWatchedLastChange: (Boolean) -> Unit,
+     showLayoutToggle: Boolean = false,
+     currentLayoutMode: LayoutMode = LayoutMode.LIST,
+     onLayoutModeToggle: () -> Unit = {},
+     showSizeToggle: Boolean = false,
+@@ -681,21 +602,20 @@ private fun FolderGridView(folders: List<MediaFolder>, onNavigateToFolder: (Stri
+ private fun MediaList(
+     items: List<MediaItem>,
+     folderName: String,
+     favoriteKeys: Set<String>,
+     playlistKeys: Set<String>,
+     progressSnapshot: Map<String, Float>,
+     repository: MediaRepository,
+     onFavorite: (MediaItem) -> Unit,
+     onPlaylist: (MediaItem) -> Unit,
+     onNavigateToVideo: (Long, String) -> Unit,
+-    onNavigateToAudio: (Long, String) -> Unit,
+     onNavigateToPhoto: (Long, String) -> Unit
+ ) {
+     if (items.isEmpty()) {
+         EmptyStateView("No media items found")
+     } else {
+         val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
+         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 96.dp)) {
+             items(
+                 items,
+                 key = { it.storageKey },
+@@ -705,39 +625,38 @@ private fun MediaList(
+                     item = item,
+                     isFavorite = item.storageKey in favoriteKeys,
+                     isInPlaylist = item.storageKey in playlistKeys,
+                     progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+                     isLastViewed = lastViewedKey == item.storageKey,
+                     onFavoriteClick = { onFavorite(item) },
+                     onPlaylistClick = { onPlaylist(item) },
+                     onClick = {
+                         when (item.type) {
+                             MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
+-                            MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
++                            MediaType.AUDIO -> Unit
+                             MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+                         }
+                     }
+                 )
+             }
+         }
+     }
+ }
+ 
+ @Composable
+ private fun MediaGridView(
+     items: List<MediaItem>,
+     folderName: String,
+     progressSnapshot: Map<String, Float>,
+     repository: MediaRepository,
+     gridSizeDp: Int = 220,
+     onNavigateToVideo: (Long, String) -> Unit,
+-    onNavigateToAudio: (Long, String) -> Unit,
+     onNavigateToPhoto: (Long, String) -> Unit
+ ) {
+     if (items.isEmpty()) {
+         EmptyStateView("No media items found")
+     } else {
+         val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
+         LazyVerticalGrid(
+             columns = GridCells.Adaptive(gridSizeDp.dp),
+             verticalArrangement = Arrangement.spacedBy(16.dp),
+             horizontalArrangement = Arrangement.spacedBy(16.dp),
+@@ -748,21 +667,21 @@ private fun MediaGridView(
+                 key = { it.storageKey },
+                 contentType = { it.type }
+             ) { item ->
+                 MediaGridTile(
+                     item = item,
+                     progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+                     isLastViewed = lastViewedKey == item.storageKey,
+                     onClick = {
+                         when (item.type) {
+                             MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
+-                            MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
++                            MediaType.AUDIO -> Unit
+                             MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+                         }
+                     }
+                 )
+             }
+         }
+     }
+ }
+ 
+ @Composable
+@@ -801,21 +720,21 @@ private fun PhotoGrid(items: List<MediaItem>, onNavigateToPhoto: (Long, String)
+ }
+ 
+ @Composable
+ private fun PermissionView(onGrantClick: () -> Unit) {
+     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+             Icon(Icons.Default.Lock, contentDescription = null, tint = PrimaryNeonPurple, modifier = Modifier.size(64.dp))
+             Spacer(Modifier.height(14.dp))
+             Text("Media Permission Required", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+             Spacer(Modifier.height(8.dp))
+-            Text("The app needs media access to scan your local video, audio, and images.", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
++            Text("The app needs media access to scan your local videos and images.", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
+             Spacer(Modifier.height(22.dp))
+             Button(onClick = onGrantClick, colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeonPurple), shape = RoundedCornerShape(10.dp)) {
+                 Text("Grant Permission", color = Color.White, fontWeight = FontWeight.Bold)
+             }
+         }
+     }
+ }
+ 
+ @Composable
+ fun EmptyStateView(message: String) {
+@@ -870,23 +789,22 @@ fun GlassmorphicBottomNavBar(
+     ) {
+         Row(
+             modifier = Modifier
+                 .fillMaxSize()
+                 .padding(horizontal = 10.dp),
+             horizontalArrangement = Arrangement.SpaceAround,
+             verticalAlignment = Alignment.CenterVertically
+         ) {
+             NavBarItem(Icons.Default.Folder, "文件夹", selectedTab == 0) { onTabSelected(0) }
+             NavBarItem(Icons.Default.PlayCircle, "视频", selectedTab == 1) { onTabSelected(1) }
+-            NavBarItem(Icons.Default.MusicNote, "音频", selectedTab == 2) { onTabSelected(2) }
+-            NavBarItem(Icons.Default.Image, "图片", selectedTab == 3) { onTabSelected(3) }
+-            NavBarItem(Icons.Default.Star, "收藏", selectedTab == 4) { onTabSelected(4) }
++            NavBarItem(Icons.Default.Image, "图片", selectedTab == 2) { onTabSelected(2) }
++            NavBarItem(Icons.Default.Star, "收藏", selectedTab == 3) { onTabSelected(3) }
+         }
+     }
+ }
+ 
+ @Composable
+ fun NavBarItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: () -> Unit) {
+     val selectionProgress by androidx.compose.animation.core.animateFloatAsState(
+         targetValue = if (isSelected) 1f else 0f,
+         animationSpec = tween(durationMillis = 220),
+         label = "navSelection"
+@@ -923,21 +841,20 @@ fun NavBarItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: (
+ }
+ 
+ private enum class SortMode(val label: String) {
+     BY_TIME("Time"),
+     BY_NAME("Name"),
+     BY_SIZE("Size")
+ }
+ 
+ private data class FilteredMedia(
+     val videos: List<MediaItem>,
+-    val audios: List<MediaItem>,
+     val photos: List<MediaItem>,
+     val favorites: List<MediaItem>
+ )
+ 
+ private fun sortMedia(
+     items: List<MediaItem>,
+     sortMode: SortMode,
+     watchedLast: Boolean,
+     watchedSet: Set<String>
+ ): List<MediaItem> {
+@@ -1064,21 +981,20 @@ private fun AlienBlackCatIcon(
+ }
+ 
+ @Composable
+ private fun MediaGalleryView(
+     items: List<MediaItem>,
+     folderName: String,
+     progressSnapshot: Map<String, Float>,
+     columnsCount: Int,
+     onColumnsChange: (Int) -> Unit,
+     onNavigateToVideo: (Long, String) -> Unit,
+-    onNavigateToAudio: (Long, String) -> Unit,
+     onNavigateToPhoto: (Long, String) -> Unit
+ ) {
+     if (items.isEmpty()) {
+         EmptyStateView("暂无视频文件")
+     } else {
+         LazyVerticalGrid(
+             columns = GridCells.Fixed(columnsCount),
+             verticalArrangement = Arrangement.spacedBy(1.5.dp),
+             horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+             contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp),
+@@ -1091,21 +1007,21 @@ private fun MediaGalleryView(
+                 items,
+                 key = { it.storageKey },
+                 contentType = { it.type }
+             ) { item ->
+                 MediaGalleryTile(
+                     item = item,
+                     progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+                     onClick = {
+                         when (item.type) {
+                             MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
+-                            MediaType.AUDIO -> onNavigateToAudio(item.id, folderName)
++                            MediaType.AUDIO -> Unit
+                             MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+                         }
+                     }
+                 )
+             }
+         }
+     }
+ }
+ 
+ @Composable
+diff --git a/app/src/test/java/com/example/videoplayer/ProductSurfaceContractTest.kt b/app/src/test/java/com/example/videoplayer/ProductSurfaceContractTest.kt
+new file mode 100644
+index 0000000..f171474
+--- /dev/null
++++ b/app/src/test/java/com/example/videoplayer/ProductSurfaceContractTest.kt
+@@ -0,0 +1,20 @@
++package com.example.videoplayer
++
++import java.io.File
++import org.junit.Assert.assertFalse
++import org.junit.Test
++
++class ProductSurfaceContractTest {
++    @Test
++    fun standaloneAudioAndSearchAreAbsent() {
++        val root = File(System.getProperty("user.dir"))
++        val source = File(root, "src/main/java/com/example/videoplayer").walkTopDown()
++            .filter { it.extension == "kt" }
++            .joinToString("\n") { it.readText() }
++
++        assertFalse(source.contains("AudioPlayerScreen("))
++        assertFalse(source.contains("READ_MEDIA_AUDIO"))
++        assertFalse(source.contains("SearchBar("))
++        assertFalse(source.contains("Icons.Default.Search"))
++    }
++}

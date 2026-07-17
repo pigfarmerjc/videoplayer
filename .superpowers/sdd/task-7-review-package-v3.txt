@@ -1,0 +1,183 @@
+﻿TASK 7 FINAL REVIEW
+BASE 51c3db9
+HEAD a2e31ae
+ .../videoplayer/playback/PlaybackController.kt     | 41 +++++++++++----
+ .../example/videoplayer/playback/PlayerEngine.kt   |  5 ++
+ .../videoplayer/playback/PlaybackControllerTest.kt | 59 +++++++++++++++++++++-
+ 3 files changed, 93 insertions(+), 12 deletions(-)
+diff --git a/app/src/main/java/com/example/videoplayer/playback/PlaybackController.kt b/app/src/main/java/com/example/videoplayer/playback/PlaybackController.kt
+index e15813a..6e8646a 100644
+--- a/app/src/main/java/com/example/videoplayer/playback/PlaybackController.kt
++++ b/app/src/main/java/com/example/videoplayer/playback/PlaybackController.kt
+@@ -5,12 +5,14 @@ import kotlinx.coroutines.CompletableDeferred
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.Job
++import kotlinx.coroutines.NonCancellable
+ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.channels.Channel
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
+ 
+ class PlaybackControllerClosedException(
+     message: String,
+@@ -216,9 +218,10 @@ class PlaybackController(
+             return checkNotNull(activeEngine) { "No active player engine" }
+         }
+ 
+-        for (command in commands) {
+-            try {
+-                when (command) {
++        try {
++            for (command in commands) {
++                try {
++                    when (command) {
+                     is Command.Load -> {
+                         currentSession = command.session
+                         if (activeEngine != null && !hasUsableEngine) {
+@@ -363,15 +366,33 @@ class PlaybackController(
+                             }
+                         }
+                     }
++                    }
++                } catch (error: CancellationException) {
++                    command.completion?.completeExceptionally(error)
++                    throw error
++                } catch (error: Throwable) {
++                    if (_state.value.error !== error) {
++                        _state.value = _state.value.copy(error = error)
++                    }
++                    command.completion?.completeExceptionally(error)
+                 }
+-            } catch (error: CancellationException) {
+-                command.completion?.completeExceptionally(error)
+-                throw error
+-            } catch (error: Throwable) {
+-                if (_state.value.error !== error) {
+-                    _state.value = _state.value.copy(error = error)
++            }
++        } finally {
++            withContext(NonCancellable) {
++                val engine = activeEngine
++                if (engine != null) {
++                    hasUsableEngine = false
++                    acceptedGeneration = null
++                    val priorError = _state.value.error
++                    publish(priorError)
++                    try {
++                        engine.release()
++                        activeEngine = null
++                        publish(priorError)
++                    } catch (releaseError: Throwable) {
++                        publish(releaseError)
++                    }
+                 }
+-                command.completion?.completeExceptionally(error)
+             }
+         }
+     }
+diff --git a/app/src/main/java/com/example/videoplayer/playback/PlayerEngine.kt b/app/src/main/java/com/example/videoplayer/playback/PlayerEngine.kt
+index b497402..a8ff718 100644
+--- a/app/src/main/java/com/example/videoplayer/playback/PlayerEngine.kt
++++ b/app/src/main/java/com/example/videoplayer/playback/PlayerEngine.kt
+@@ -40,6 +40,11 @@ interface PlayerEngine {
+ 
+     suspend fun snapshot(): PlaybackSnapshot
+ 
++    /**
++     * Releases all engine resources. A successful call must be idempotent; the controller will
++     * never call it again after success. If this call throws or is cancelled, resources are
++     * considered quarantined and the controller may retry release without issuing other commands.
++     */
+     suspend fun release()
+ 
+     fun interface Listener {
+diff --git a/app/src/test/java/com/example/videoplayer/playback/PlaybackControllerTest.kt b/app/src/test/java/com/example/videoplayer/playback/PlaybackControllerTest.kt
+index 49e706d..c80af77 100644
+--- a/app/src/test/java/com/example/videoplayer/playback/PlaybackControllerTest.kt
++++ b/app/src/test/java/com/example/videoplayer/playback/PlaybackControllerTest.kt
+@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.SupervisorJob
+ import kotlinx.coroutines.async
++import kotlinx.coroutines.cancelAndJoin
+ import kotlinx.coroutines.runBlocking
+ import kotlinx.coroutines.withTimeout
+ import org.junit.Assert.assertEquals
+@@ -259,6 +260,57 @@ class PlaybackControllerTest {
+         Unit
+     }
+ 
++    @Test
++    fun cancellingOwnerScopeReleasesActiveEngineBeforeActorCloses() = runBlocking {
++        val factory = FakeEngineFactory()
++        val owner = SupervisorJob()
++        val controller = controller(
++            factory,
++            CoroutineScope(owner + Dispatchers.Default)
++        )
++        controller.load(session("video"))
++        val engine = factory.single(EngineChoice.EXO)
++
++        owner.cancelAndJoin()
++
++        assertEquals(1, engine.releaseAttempts)
++        assertEquals(1, engine.successfulReleases)
++        assertEquals(0, factory.activeCount)
++        assertNull(controller.state.value.engineChoice)
++        assertFalse(controller.state.value.hasUsableEngine)
++        assertFails<PlaybackControllerClosedException> {
++            withTimeout(1_000) { controller.play() }
++        }
++        Unit
++    }
++
++    @Test
++    fun cancellationReleaseFailureQuarantinesEngineAndDrainsCommands() = runBlocking {
++        val factory = FakeEngineFactory()
++        val owner = SupervisorJob()
++        val controller = controller(
++            factory,
++            CoroutineScope(owner + Dispatchers.Default)
++        )
++        controller.load(session("video"))
++        val engine = factory.single(EngineChoice.EXO)
++        val releaseFailure = IllegalStateException("cancel cleanup failed")
++        engine.releaseFailure = releaseFailure
++
++        owner.cancelAndJoin()
++
++        assertEquals(1, engine.releaseAttempts)
++        assertEquals(0, engine.successfulReleases)
++        assertEquals(1, factory.activeCount)
++        assertEquals(EngineChoice.EXO, controller.state.value.engineChoice)
++        assertFalse(controller.state.value.hasUsableEngine)
++        assertSame(releaseFailure, controller.state.value.error)
++        assertFails<PlaybackControllerClosedException> {
++            withTimeout(1_000) { controller.load(session("other")) }
++        }
++        assertEquals(1, factory.all(EngineChoice.EXO).size)
++    }
++
+     @Test
+     fun loadPlayPauseSeekAndAudioSelectionPublishState() = runBlocking {
+         val factory = FakeEngineFactory()
+@@ -344,10 +396,13 @@ class PlaybackControllerTest {
+         }
+     }
+ 
+-    private fun controller(factory: FakeEngineFactory): PlaybackController =
++    private fun controller(
++        factory: FakeEngineFactory,
++        scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
++    ): PlaybackController =
+         PlaybackController(
+             engineFactory = factory,
+-            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
++            scope = scope
+         )
+ 
+     private fun session(

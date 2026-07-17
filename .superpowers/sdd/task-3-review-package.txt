@@ -1,0 +1,505 @@
+﻿COMMITS
+85093b8 docs: record task 3 verification
+3a09a8f refactor: centralize media library state
+STAT
+ .superpowers/sdd/task-3-report.md                  |  41 ++++++++
+ .../videoplayer/data/library/MediaLibraryState.kt  |  38 +++++++
+ .../videoplayer/data/library/MediaLibraryStore.kt  | 116 +++++++++++++++++++++
+ .../videoplayer/data/repository/MediaRepository.kt |  61 ++++++++---
+ .../data/library/MediaLibraryStoreTest.kt          | 110 +++++++++++++++++++
+ 5 files changed, 353 insertions(+), 13 deletions(-)
+DIFF
+diff --git a/.superpowers/sdd/task-3-report.md b/.superpowers/sdd/task-3-report.md
+new file mode 100644
+index 0000000..529d939
+--- /dev/null
++++ b/.superpowers/sdd/task-3-report.md
+@@ -0,0 +1,41 @@
++# Task 3 Report: generation-safe media library store
++
++## Status
++
++DONE_WITH_CONCERNS
++
++## RED/GREEN evidence
++
++- RED: Added `MediaLibraryStoreTest` before the production store. It covers a forced refresh that completes ahead of an older refresh, sharing concurrent non-forced refreshes, and publishing photos with a typed video-query failure.
++- RED command: `./gradlew.bat testDebugUnitTest --tests "*.MediaLibraryStoreTest"` was run before production code was added. The Android main-source compilation stopped before test compilation because of pre-existing errors in `VideoPlayerScreen.kt`: line 4538 has an invalid implicit `AnimatedVisibility` receiver and line 4620 has an unresolved `collectIsPressedAsState`.
++- GREEN command: the same focused command was run after the implementation and is blocked by those same unrelated main-source errors, before it can execute `MediaLibraryStoreTest`. No `VideoPlayerScreen` code was changed.
++- Static verification: reviewed the exact state transitions and ran `git diff --check` after the changes; it completed without whitespace errors.
++
++## Interfaces
++
++- `MediaLibraryState` holds generation, videos, photos, refresh status, and typed `LibraryError`.
++- `MediaLibraryScanner` is a suspend-only boundary with no `Context` or other Android framework dependency in the store.
++- `MediaLibraryStore.state` is a `StateFlow<MediaLibraryState>` and `refresh(force)` coalesces non-forced work while allowing a forced request to advance the generation.
++- `MediaRepository` implements the scanner contract and reports video and photo query outcomes independently.
++
++## Files
++
++- `app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt`
++- `app/src/main/java/com/example/videoplayer/data/library/MediaLibraryStore.kt`
++- `app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt`
++- `app/src/test/java/com/example/videoplayer/data/library/MediaLibraryStoreTest.kt`
++
++## Self-review
++
++- A non-forced caller reuses the in-flight non-forced request, so it cannot start a duplicate ordinary scan.
++- A forced refresh receives a newer atomic generation and may complete before the old scan; only the current generation publishes state.
++- Query failures map to `LibraryError.PartialQueryFailure`, while the successful media type remains available.
++- The store only exposes videos and photos; repository conversion filters out standalone audio.
++
++## Concerns
++
++- The focused unit suite cannot currently compile or run because of the existing unrelated `VideoPlayerScreen.kt` errors listed above. The test is intentionally pure coroutine-based and does not instantiate Android framework objects, but Android's normal Gradle unit-test task compiles all main sources first.
++
++## Commit
++
++Implementation: `3a09a8f refactor: centralize media library state`.
+diff --git a/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt b/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt
+new file mode 100644
+index 0000000..628625f
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt
+@@ -0,0 +1,38 @@
++package com.example.videoplayer.data.library
++
++import com.example.videoplayer.data.model.MediaItem
++
++data class MediaLibraryState(
++    val generation: Long = 0L,
++    val videos: List<MediaItem> = emptyList(),
++    val photos: List<MediaItem> = emptyList(),
++    val isRefreshing: Boolean = false,
++    val error: LibraryError? = null
++)
++
++sealed interface LibraryError {
++    data class PartialQueryFailure(
++        val video: Throwable?,
++        val photo: Throwable?
++    ) : LibraryError {
++        init {
++            require(video != null || photo != null)
++        }
++    }
++
++    data class ScanFailure(val cause: Throwable) : LibraryError
++}
++
++sealed interface MediaQueryResult {
++    data class Success(val items: List<MediaItem>) : MediaQueryResult
++    data class Failure(val cause: Throwable) : MediaQueryResult
++}
++
++data class MediaLibraryScanResult(
++    val videos: MediaQueryResult,
++    val photos: MediaQueryResult
++)
++
++interface MediaLibraryScanner {
++    suspend fun scan(force: Boolean): MediaLibraryScanResult
++}
+diff --git a/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryStore.kt b/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryStore.kt
+new file mode 100644
+index 0000000..56fbc9d
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryStore.kt
+@@ -0,0 +1,116 @@
++package com.example.videoplayer.data.library
++
++import com.example.videoplayer.data.model.MediaItem
++import java.util.concurrent.atomic.AtomicLong
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++
++class MediaLibraryStore(
++    private val scanner: MediaLibraryScanner
++) {
++    private val refreshMutex = Mutex()
++    private val generation = AtomicLong(0L)
++    private val _state = MutableStateFlow(MediaLibraryState())
++    private var activeNonForcedRefresh: RefreshRequest? = null
++
++    val state: StateFlow<MediaLibraryState> = _state.asStateFlow()
++
++    suspend fun refresh(force: Boolean) {
++        val (request, startsScan) = refreshMutex.withLock {
++            if (!force) {
++                activeNonForcedRefresh?.let { return@withLock it to false }
++            }
++
++            RefreshRequest(
++                generation = generation.incrementAndGet(),
++                completion = CompletableDeferred()
++            ).also { next ->
++                if (!force) activeNonForcedRefresh = next
++            } to true
++        }
++
++        if (startsScan) {
++            executeScan(request, force)
++        }
++
++        publishIfCurrent(request)
++    }
++
++    private suspend fun executeScan(request: RefreshRequest, force: Boolean) {
++        setRefreshingIfCurrent(request.generation)
++        try {
++            request.completion.complete(RefreshOutcome.ScanResult(scanner.scan(force)))
++        } catch (error: CancellationException) {
++            request.completion.cancel(error)
++            throw error
++        } catch (error: Throwable) {
++            request.completion.complete(RefreshOutcome.ScanFailure(error))
++        } finally {
++            refreshMutex.withLock {
++                if (activeNonForcedRefresh === request) {
++                    activeNonForcedRefresh = null
++                }
++            }
++        }
++    }
++
++    private suspend fun publishIfCurrent(request: RefreshRequest) {
++        val outcome = request.completion.await()
++        if (request.generation != generation.get()) return
++
++        _state.value = when (outcome) {
++            is RefreshOutcome.ScanResult -> outcome.result.toState(request.generation)
++            is RefreshOutcome.ScanFailure -> MediaLibraryState(
++                generation = request.generation,
++                error = LibraryError.ScanFailure(outcome.cause)
++            )
++        }
++    }
++
++    private fun setRefreshingIfCurrent(requestGeneration: Long) {
++        if (requestGeneration != generation.get()) return
++        _state.value = _state.value.copy(
++            generation = requestGeneration,
++            isRefreshing = true,
++            error = null
++        )
++    }
++
++    private fun MediaLibraryScanResult.toState(generation: Long): MediaLibraryState {
++        val videoQuery = videos
++        val photoQuery = photos
++        val videoFailure = (videoQuery as? MediaQueryResult.Failure)?.cause
++        val photoFailure = (photoQuery as? MediaQueryResult.Failure)?.cause
++        return MediaLibraryState(
++            generation = generation,
++            videos = videoQuery.itemsOrEmpty(),
++            photos = photoQuery.itemsOrEmpty(),
++            isRefreshing = false,
++            error = if (videoFailure == null && photoFailure == null) {
++                null
++            } else {
++                LibraryError.PartialQueryFailure(videoFailure, photoFailure)
++            }
++        )
++    }
++
++    private fun MediaQueryResult.itemsOrEmpty(): List<MediaItem> = when (this) {
++        is MediaQueryResult.Success -> items
++        is MediaQueryResult.Failure -> emptyList()
++    }
++
++    private data class RefreshRequest(
++        val generation: Long,
++        val completion: CompletableDeferred<RefreshOutcome>
++    )
++
++    private sealed interface RefreshOutcome {
++        data class ScanResult(val result: MediaLibraryScanResult) : RefreshOutcome
++        data class ScanFailure(val cause: Throwable) : RefreshOutcome
++    }
++}
+diff --git a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+index 674e5ac..7e6d87f 100644
+--- a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
++++ b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+@@ -1,29 +1,32 @@
+ package com.example.videoplayer.data.repository
+ 
+ import android.content.ContentUris
+ import android.content.Context
+ import android.database.Cursor
+ import android.net.Uri
+ import android.provider.MediaStore
++import com.example.videoplayer.data.library.MediaLibraryScanResult
++import com.example.videoplayer.data.library.MediaLibraryScanner
++import com.example.videoplayer.data.library.MediaQueryResult
+ import com.example.videoplayer.data.model.MediaFolder
+ import com.example.videoplayer.data.model.MediaItem
+ import com.example.videoplayer.data.model.MediaType
+ import com.example.videoplayer.data.model.LayoutMode
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.async
+ import kotlinx.coroutines.withContext
+ import java.io.File
+ import java.util.Locale
+ import java.util.concurrent.ConcurrentHashMap
+ 
+-class MediaRepository(private val context: Context) {
++class MediaRepository(private val context: Context) : MediaLibraryScanner {
+     @Volatile private var cachedItems: List<MediaItem>? = null
+     @Volatile private var cachedAtMs: Long = 0L
+     // Lazy initialize SharedPreferences to avoid repeated getSharedPreferences calls (#9)
+     private val prefs by lazy { context.getSharedPreferences("aurora_player_prefs", Context.MODE_PRIVATE) }
+     @Volatile private var cachedFavoriteKeys: Set<String>? = null
+     @Volatile private var cachedPlaylistKeys: Set<String>? = null
+     @Volatile private var cachedWatchedKeys: Set<String>? = null
+     // key = uniqueKey, value = last_played_at timestamp ms
+     @Volatile private var cachedLastPlayedMap: Map<String, Long>? = null
+     // Folder 列表缓存：5 秒 TTL，避免 toggleFavorite 频繁触发重算
+@@ -47,61 +50,81 @@ class MediaRepository(private val context: Context) {
+         private val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif")
+         private const val MEDIA_CACHE_TTL_MS = 10 * 60 * 1000L
+         private const val FOLDER_CACHE_TTL_MS = 5_000L
+     }
+ 
+     fun hasFreshMediaCache(): Boolean {
+         val now = System.currentTimeMillis()
+         return cachedItems != null && now - cachedAtMs < MEDIA_CACHE_TTL_MS
+     }
+ 
+-    suspend fun scanMedia(forceRefresh: Boolean = false): List<MediaItem> = withContext(Dispatchers.IO) {
++    override suspend fun scan(force: Boolean): MediaLibraryScanResult = withContext(Dispatchers.IO) {
+         val now = System.currentTimeMillis()
+-        cachedItems?.takeIf { !forceRefresh && now - cachedAtMs < MEDIA_CACHE_TTL_MS }?.let { return@withContext it }
++        cachedItems?.takeIf { !force && now - cachedAtMs < MEDIA_CACHE_TTL_MS }?.let {
++            return@withContext it.toLibraryScanResult()
++        }
+ 
+         val interner = StringInterner()
+         val items = linkedMapOf<String, MediaItem>()
+-        val videosDeferred = async { scanVideos(interner) }
+-        val isoDeferred = async { scanIsoFiles(interner) }
+-        val imagesDeferred = async { scanImages(interner) }
++        val videosDeferred = async { runCatching { scanVideos(interner) + scanIsoFiles(interner) } }
++        val imagesDeferred = async { runCatching { scanImages(interner) } }
++        val videoQuery = videosDeferred.await()
++        val photoQuery = imagesDeferred.await()
+ 
+-        videosDeferred.await().forEach { items[it.uniqueKey] = it }
+-        isoDeferred.await().forEach { items[it.uniqueKey] = it }
+-        imagesDeferred.await().forEach { items[it.uniqueKey] = it }
++        videoQuery.getOrNull()?.forEach { items[it.uniqueKey] = it }
++        photoQuery.getOrNull()?.forEach { items[it.uniqueKey] = it }
+ 
+-        if (forceRefresh) {
++        if (force) {
+             scanPhysicalRoots(items, interner)
+         }
+ 
+         val allPrefs = prefs.all
+-        items.values.map { item ->
++        val normalized = items.values.map { item ->
+             if (item.type == MediaType.VIDEO) {
+                 val savedDuration = (allPrefs["duration:${item.uniqueKey}"] as? Long) ?: 0L
+                 val savedResolution = allPrefs["resolution:${item.uniqueKey}"] as? String
+                 if (savedDuration > 0L || !savedResolution.isNullOrBlank()) {
+                     item.copy(
+                         duration = if (savedDuration > 0L) savedDuration else item.duration,
+                         resolution = if (!savedResolution.isNullOrBlank()) savedResolution else item.resolution
+                     )
+                 } else {
+                     item
+                 }
+             } else {
+                 item
+             }
+         }.sortedWith(
+             compareByDescending<MediaItem> { it.dateAdded }
+                 .thenBy { it.displayName.lowercase(Locale.ROOT) }
+-        ).also {
+-            cachedItems = it
++        )
++
++        if (videoQuery.isSuccess && photoQuery.isSuccess) {
++            cachedItems = normalized
+             cachedAtMs = now
+         }
++
++        MediaLibraryScanResult(
++            videos = videoQuery.fold(
++                onSuccess = { MediaQueryResult.Success(normalized.filter { item -> item.type == MediaType.VIDEO }) },
++                onFailure = { MediaQueryResult.Failure(it) }
++            ),
++            photos = photoQuery.fold(
++                onSuccess = { MediaQueryResult.Success(normalized.filter { item -> item.type == MediaType.PHOTO }) },
++                onFailure = { MediaQueryResult.Failure(it) }
++            )
++        )
++    }
++
++    suspend fun scanMedia(forceRefresh: Boolean = false): List<MediaItem> {
++        val result = scan(forceRefresh)
++        return result.videos.itemsOrEmpty() + result.photos.itemsOrEmpty()
+     }
+ 
+     suspend fun getFolders(items: List<MediaItem>): List<MediaFolder> = withContext(Dispatchers.Default) {
+         val now = System.currentTimeMillis()
+         cachedFolders?.takeIf { now - cachedFoldersAtMs < FOLDER_CACHE_TTL_MS }?.let { return@withContext it }
+         buildFolders(items).also {
+             cachedFolders = it
+             cachedFoldersAtMs = now
+         }
+     }
+@@ -665,20 +688,32 @@ class MediaRepository(private val context: Context) {
+         val list = mutableListOf<MediaItem>()
+         context.contentResolver.query(uri, projection, selection, selectionArgs, "${MediaStore.MediaColumns.DATE_ADDED} DESC")?.use { cursor ->
+             while (cursor.moveToNext()) {
+                 val item = mapper(cursor)
+                 if (item.size > 0) list.add(item)
+             }
+         }
+         return list
+     }
+ 
++    private fun List<MediaItem>.toLibraryScanResult(): MediaLibraryScanResult {
++        return MediaLibraryScanResult(
++            videos = MediaQueryResult.Success(filter { it.type == MediaType.VIDEO }),
++            photos = MediaQueryResult.Success(filter { it.type == MediaType.PHOTO })
++        )
++    }
++
++    private fun MediaQueryResult.itemsOrEmpty(): List<MediaItem> = when (this) {
++        is MediaQueryResult.Success -> items
++        is MediaQueryResult.Failure -> emptyList()
++    }
++
+     private fun isInternalPath(path: String): Boolean {
+         return path.startsWith("/storage/emulated") || path.startsWith("/sdcard")
+     }
+ 
+     private fun typeFromExtension(ext: String): MediaType? = when (ext) {
+         in videoExtensions -> MediaType.VIDEO
+         in imageExtensions -> MediaType.PHOTO
+         else -> null
+     }
+ 
+diff --git a/app/src/test/java/com/example/videoplayer/data/library/MediaLibraryStoreTest.kt b/app/src/test/java/com/example/videoplayer/data/library/MediaLibraryStoreTest.kt
+new file mode 100644
+index 0000000..4f46bee
+--- /dev/null
++++ b/app/src/test/java/com/example/videoplayer/data/library/MediaLibraryStoreTest.kt
+@@ -0,0 +1,110 @@
++package com.example.videoplayer.data.library
++
++import com.example.videoplayer.data.model.MediaItem
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.async
++import kotlinx.coroutines.runBlocking
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertSame
++import org.junit.Test
++
++class MediaLibraryStoreTest {
++    @Test
++    fun forcedRefreshPublishesNewerGenerationWhenOlderScanFinishesLast() = runBlocking {
++        val scanner = DeferredScanner()
++        val store = MediaLibraryStore(scanner)
++        val first = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
++
++        scanner.started(0).await()
++        val second = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = true) }
++
++        scanner.started(1).await()
++        scanner.complete(1, success(videos = mediaItems(2)))
++        second.await()
++        scanner.complete(0, success(videos = mediaItems(1)))
++        first.await()
++
++        assertEquals(2, store.state.value.generation)
++        assertEquals(2, store.state.value.videos.size)
++        assertFalse(store.state.value.isRefreshing)
++        assertEquals(listOf(false, true), scanner.calls)
++    }
++
++    @Test
++    fun concurrentNonForcedRefreshesShareOneScan() = runBlocking {
++        val scanner = DeferredScanner()
++        val store = MediaLibraryStore(scanner)
++        val first = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
++
++        scanner.started(0).await()
++        val second = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
++
++        assertEquals(listOf(false), scanner.calls)
++        scanner.complete(0, success(videos = mediaItems(1)))
++        first.await()
++        second.await()
++
++        assertEquals(listOf(false), scanner.calls)
++        assertEquals(1, store.state.value.videos.size)
++    }
++
++    @Test
++    fun videoQueryFailurePublishesAvailablePhotosWithTypedPartialError() = runBlocking {
++        val scanner = DeferredScanner()
++        val store = MediaLibraryStore(scanner)
++        val failure = IllegalStateException("video query failed")
++        val refresh = async(Dispatchers.Default) { store.refresh(force = false) }
++
++        scanner.started(0).await()
++        scanner.complete(
++            0,
++            MediaLibraryScanResult(
++                videos = MediaQueryResult.Failure(failure),
++                photos = MediaQueryResult.Success(mediaItems(2))
++            )
++        )
++        refresh.await()
++
++        val error = store.state.value.error as LibraryError.PartialQueryFailure
++        assertSame(failure, error.video)
++        assertNull(error.photo)
++        assertEquals(2, store.state.value.photos.size)
++        assertEquals(emptyList<MediaItem>(), store.state.value.videos)
++    }
++
++    private fun success(
++        videos: List<MediaItem> = emptyList(),
++        photos: List<MediaItem> = emptyList()
++    ) = MediaLibraryScanResult(
++        videos = MediaQueryResult.Success(videos),
++        photos = MediaQueryResult.Success(photos)
++    )
++
++    @Suppress("UNCHECKED_CAST")
++    private fun mediaItems(count: Int): List<MediaItem> =
++        java.util.Collections.nCopies<Any?>(count, null) as List<MediaItem>
++
++    private class DeferredScanner : MediaLibraryScanner {
++        val calls = mutableListOf<Boolean>()
++        private val results = MutableList(4) { CompletableDeferred<MediaLibraryScanResult>() }
++        private val started = MutableList(4) { CompletableDeferred<Unit>() }
++
++        override suspend fun scan(force: Boolean): MediaLibraryScanResult {
++            val index = synchronized(this) {
++                calls += force
++                calls.lastIndex
++            }
++            started[index].complete(Unit)
++            return results[index].await()
++        }
++
++        fun started(index: Int): CompletableDeferred<Unit> = started[index]
++
++        fun complete(index: Int, result: MediaLibraryScanResult) {
++            results[index].complete(result)
++        }
++    }
++}

@@ -1,0 +1,561 @@
+﻿TASK 6 BLOCKER REVIEW
+BASE 7677d67
+HEAD 5c5ad9b
+ .../com/example/videoplayer/VideoGalleryUiTest.kt  |  21 ++++
+ .../videoplayer/data/repository/MediaRepository.kt |   7 ++
+ .../videoplayer/ui/gallery/VideoGalleryGrid.kt     |  46 +++----
+ .../example/videoplayer/ui/screens/MainScreen.kt   |  82 ++++++++++---
+ .../videoplayer/media/thumbnail/FastScrollGate.kt  | 132 ++++++++++++++++-----
+ .../media/thumbnail/ThumbnailSchedulerTest.kt      |  76 ++++++++----
+ 6 files changed, 268 insertions(+), 96 deletions(-)
+diff --git a/app/src/androidTest/java/com/example/videoplayer/VideoGalleryUiTest.kt b/app/src/androidTest/java/com/example/videoplayer/VideoGalleryUiTest.kt
+index b8e66ee..0abbe0a 100644
+--- a/app/src/androidTest/java/com/example/videoplayer/VideoGalleryUiTest.kt
++++ b/app/src/androidTest/java/com/example/videoplayer/VideoGalleryUiTest.kt
+@@ -12,7 +12,9 @@ import com.example.videoplayer.data.model.MediaItem
+ import com.example.videoplayer.data.model.MediaType
+ import com.example.videoplayer.ui.screens.MainGalleryContent
+ import com.example.videoplayer.ui.gallery.GalleryAspectMode
++import com.example.videoplayer.ui.gallery.PermissionRecoveryAction
+ import com.example.videoplayer.ui.photos.PhotoAccessState
++import com.example.videoplayer.ui.screens.MediaPermissionScreen
+ import com.example.videoplayer.ui.theme.VideoPlayerTheme
+ import org.junit.Rule
+ import org.junit.Test
+@@ -142,6 +144,25 @@ class VideoGalleryUiTest {
+         composeRule.onNodeWithTag("selection-actions").assertDoesNotExist()
+     }
+ 
++    @Test
++    fun permanentVideoPermissionDenialOpensSystemSettings() {
++        var openedSettings = false
++        composeRule.setContent {
++            VideoPlayerTheme {
++                MediaPermissionScreen(
++                    title = "允许访问视频",
++                    message = "请在系统设置中允许访问视频。",
++                    action = PermissionRecoveryAction.OPEN_SETTINGS,
++                    onRequest = {},
++                    onOpenSettings = { openedSettings = true }
++                )
++            }
++        }
++
++        composeRule.onNodeWithTag("open-video-settings").performClick()
++        composeRule.runOnIdle { assert(openedSettings) }
++    }
++
+     private fun setGalleryContent(
+         progress: Map<String, Float> = emptyMap(),
+         onAddToPlaylist: (List<MediaItem>) -> Unit = {},
+diff --git a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+index be0bdf5..3e1d26a 100644
+--- a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
++++ b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+@@ -376,6 +376,13 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
+         prefs.edit().putString("gallery_aspect_mode", value).apply()
+     }
+ 
++    fun wasVideoPermissionRequestedOnce(): Boolean =
++        prefs.getBoolean("video_permission_requested_once", false)
++
++    fun setVideoPermissionRequestedOnce() {
++        prefs.edit().putBoolean("video_permission_requested_once", true).apply()
++    }
++
+     fun wasPhotoPermissionRequestedOnce(): Boolean =
+         prefs.getBoolean("photo_permission_requested_once", false)
+ 
+diff --git a/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryGrid.kt b/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryGrid.kt
+index 85e3675..e6cd41c 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryGrid.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryGrid.kt
+@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
+ import androidx.compose.foundation.layout.padding
+ import androidx.compose.foundation.lazy.grid.GridCells
+ import androidx.compose.foundation.lazy.grid.GridItemSpan
++import androidx.compose.foundation.lazy.grid.LazyGridItemInfo
+ import androidx.compose.foundation.lazy.grid.LazyGridState
+ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+ import androidx.compose.foundation.lazy.grid.items
+@@ -329,28 +330,31 @@ internal fun BindThumbnailFastScroll(state: LazyGridState, columns: Int) {
+     DisposableEffect(scrollController) {
+         onDispose { scrollController.onScrollInProgressChanged(false) }
+     }
+-    LaunchedEffect(state) {
++    LaunchedEffect(state, columns) {
++        velocityTracker.reset()
++        gate.update(isScrollInProgress = false, velocity = 0f)
++        scrollController.onScrollInProgressChanged(false)
+         var previousTime = System.nanoTime()
+         snapshotFlow {
+             val layoutInfo = state.layoutInfo
+             GridScrollSample(
+                 scrolling = state.isScrollInProgress,
+-                firstVisibleItemIndex = state.firstVisibleItemIndex,
+-                firstVisibleItemScrollOffset = state.firstVisibleItemScrollOffset,
+-                columns = columns.coerceAtLeast(1),
+-                averageLineSizePx = layoutInfo.visibleItemsInfo.averageGridLineSizePx()
++                visibleItems = layoutInfo.visibleItemsInfo,
++                mainAxisSpacing = layoutInfo.mainAxisItemSpacing
+             )
+         }.collect { sample ->
+             val now = System.nanoTime()
+             val elapsedSeconds = ((now - previousTime).coerceAtLeast(1L)) / 1_000_000_000f
+             val velocity = if (sample.scrolling) {
+-                velocityTracker.update(
+-                    firstVisibleItemIndex = sample.firstVisibleItemIndex,
+-                    firstVisibleItemScrollOffset = sample.firstVisibleItemScrollOffset,
+-                    columns = sample.columns,
+-                    averageLineSizePx = sample.averageLineSizePx,
+-                    elapsedSeconds = elapsedSeconds
+-                )
++                velocityTracker.beginSample()
++                sample.visibleItems.forEach { item ->
++                    velocityTracker.addVisibleLine(
++                        line = item.row,
++                        mainAxisOffset = item.offset.y,
++                        mainAxisSize = item.size.height
++                    )
++                }
++                velocityTracker.endSample(elapsedSeconds, sample.mainAxisSpacing)
+             } else {
+                 velocityTracker.reset()
+                 0f
+@@ -363,24 +367,10 @@ internal fun BindThumbnailFastScroll(state: LazyGridState, columns: Int) {
+ 
+ private data class GridScrollSample(
+     val scrolling: Boolean,
+-    val firstVisibleItemIndex: Int,
+-    val firstVisibleItemScrollOffset: Int,
+-    val columns: Int,
+-    val averageLineSizePx: Float
++    val visibleItems: List<LazyGridItemInfo>,
++    val mainAxisSpacing: Int
+ )
+ 
+-private fun List<androidx.compose.foundation.lazy.grid.LazyGridItemInfo>.averageGridLineSizePx(): Float {
+-    if (isEmpty()) return 0f
+-    val rowOffsets = map { it.offset.y }.distinct().sorted()
+-    val lineDistances = rowOffsets.zipWithNext { first, second -> second - first }
+-        .filter { it > 0 }
+-    return if (lineDistances.isNotEmpty()) {
+-        lineDistances.average().toFloat()
+-    } else {
+-        maxOf { it.size.height }.toFloat()
+-    }
+-}
+-
+ private fun Modifier.galleryPinch(
+     columnCount: Int,
+     onPreview: (Float) -> Unit,
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+index 9bb9cce..29fb789 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+@@ -128,6 +128,18 @@ fun MainScreen(
+     val libraryState by store.state.collectAsState()
+     var hasVideoPermission by remember { mutableStateOf(hasVideoPermission(context)) }
+     var hasPhotoPermission by remember { mutableStateOf(hasPhotoPermission(context)) }
++    var videoPermissionRequestedOnce by remember {
++        mutableStateOf(repository.wasVideoPermissionRequestedOnce())
++    }
++    var videoPermissionAction by remember {
++        mutableStateOf(
++            resolvePermissionRecoveryAction(
++                granted = hasVideoPermission,
++                requestedOnce = videoPermissionRequestedOnce,
++                shouldShowRationale = activity.shouldShowRequestPermissionRationale(videoPermission())
++            )
++        )
++    }
+     var photoPermissionRequestedOnce by remember {
+         mutableStateOf(repository.wasPhotoPermissionRequestedOnce())
+     }
+@@ -151,6 +163,14 @@ fun MainScreen(
+         scope.launch { store.refresh(force = true) }
+     }
+ 
++    fun openAppSettings() {
++        context.startActivity(
++            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
++                data = Uri.fromParts("package", context.packageName, null)
++            }
++        )
++    }
++
+     val deleteRequestLauncher = rememberLauncherForActivityResult(
+         ActivityResultContracts.StartIntentSenderForResult()
+     ) { result ->
+@@ -172,6 +192,11 @@ fun MainScreen(
+         ActivityResultContracts.RequestPermission()
+     ) { granted ->
+         hasVideoPermission = granted
++        videoPermissionAction = resolvePermissionRecoveryAction(
++            granted = granted,
++            requestedOnce = videoPermissionRequestedOnce,
++            shouldShowRationale = activity.shouldShowRequestPermissionRationale(videoPermission())
++        )
+         if (granted) scope.launch { store.refresh(force = false) }
+     }
+     val photoPermissionLauncher = rememberLauncherForActivityResult(
+@@ -188,6 +213,12 @@ fun MainScreen(
+         if (granted) refreshLibrary()
+     }
+ 
++    fun requestVideoPermission() {
++        videoPermissionRequestedOnce = true
++        repository.setVideoPermissionRequestedOnce()
++        videoPermissionLauncher.launch(videoPermission())
++    }
++
+     fun requestPhotoPermission() {
+         photoPermissionRequestedOnce = true
+         repository.setPhotoPermissionRequestedOnce()
+@@ -204,6 +235,13 @@ fun MainScreen(
+                     photoGranted != hasPhotoPermission
+                 hasVideoPermission = videoGranted
+                 hasPhotoPermission = photoGranted
++                videoPermissionAction = resolvePermissionRecoveryAction(
++                    granted = videoGranted,
++                    requestedOnce = videoPermissionRequestedOnce,
++                    shouldShowRationale = activity.shouldShowRequestPermissionRationale(
++                        videoPermission()
++                    )
++                )
+                 photoAccessState = if (photoGranted) {
+                     PhotoAccessState.Available
+                 } else {
+@@ -229,8 +267,8 @@ fun MainScreen(
+     LaunchedEffect(Unit) {
+         if (hasVideoPermission) {
+             store.refresh(force = false)
+-        } else {
+-            videoPermissionLauncher.launch(videoPermission())
++        } else if (!videoPermissionRequestedOnce) {
++            requestVideoPermission()
+         }
+     }
+ 
+@@ -290,10 +328,16 @@ fun MainScreen(
+     }
+ 
+     if (!hasVideoPermission) {
+-        PermissionScreen(
++        MediaPermissionScreen(
+             title = "允许访问视频",
+-            message = "需要读取本机视频，才能建立时间画廊。",
+-            onGrant = { videoPermissionLauncher.launch(videoPermission()) }
++            message = if (videoPermissionAction == PermissionRecoveryAction.OPEN_SETTINGS) {
++                "请在系统设置中允许访问视频。"
++            } else {
++                "需要读取本机视频，才能建立时间画廊。"
++            },
++            action = videoPermissionAction,
++            onRequest = ::requestVideoPermission,
++            onOpenSettings = ::openAppSettings
+         )
+         return
+     }
+@@ -335,13 +379,7 @@ fun MainScreen(
+         },
+         photoAccessState = photoAccessState,
+         onRequestPhotoPermission = ::requestPhotoPermission,
+-        onOpenPhotoSettings = {
+-            context.startActivity(
+-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+-                    data = Uri.fromParts("package", context.packageName, null)
+-                }
+-            )
+-        },
++        onOpenPhotoSettings = ::openAppSettings,
+         onRetryPhotoQuery = ::refreshLibrary,
+         videoQueryError = videoQueryError,
+         onRetryVideoQuery = ::refreshLibrary,
+@@ -650,7 +688,13 @@ private fun LibraryRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+ }
+ 
+ @Composable
+-private fun PermissionScreen(title: String, message: String, onGrant: () -> Unit) {
++internal fun MediaPermissionScreen(
++    title: String,
++    message: String,
++    action: PermissionRecoveryAction,
++    onRequest: () -> Unit,
++    onOpenSettings: () -> Unit
++) {
+     Box(
+         modifier = Modifier
+             .fillMaxSize()
+@@ -672,7 +716,17 @@ private fun PermissionScreen(title: String, message: String, onGrant: () -> Unit
+             Spacer(Modifier.height(6.dp))
+             Text(message, color = GalleryTextMuted, fontSize = 13.sp)
+             Spacer(Modifier.height(18.dp))
+-            Button(onClick = onGrant) { Text("继续") }
++            when (action) {
++                PermissionRecoveryAction.REQUEST -> Button(
++                    onClick = onRequest,
++                    modifier = Modifier.testTag("request-video-permission")
++                ) { Text("继续") }
++                PermissionRecoveryAction.OPEN_SETTINGS -> Button(
++                    onClick = onOpenSettings,
++                    modifier = Modifier.testTag("open-video-settings")
++                ) { Text("打开系统设置") }
++                PermissionRecoveryAction.NONE -> Unit
++            }
+         }
+     }
+ }
+diff --git a/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/FastScrollGate.kt b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/FastScrollGate.kt
+index a6f692a..713d49c 100644
+--- a/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/FastScrollGate.kt
++++ b/thumbnail-core/src/main/kotlin/com/example/videoplayer/media/thumbnail/FastScrollGate.kt
+@@ -32,49 +32,117 @@ class FastScrollGate(
+ }
+ 
+ class GridScrollVelocityTracker {
+-    private var previousIndex: Int? = null
+-    private var previousOffset = 0
+-    private var previousColumns = 1
++    private var previousLines = IntArray(MAX_VISIBLE_LINES)
++    private var previousOffsets = IntArray(MAX_VISIBLE_LINES)
++    private var previousSizes = IntArray(MAX_VISIBLE_LINES)
++    private var previousCount = 0
++    private var currentLines = IntArray(MAX_VISIBLE_LINES)
++    private var currentOffsets = IntArray(MAX_VISIBLE_LINES)
++    private var currentSizes = IntArray(MAX_VISIBLE_LINES)
++    private var currentCount = 0
+ 
+-    fun update(
+-        firstVisibleItemIndex: Int,
+-        firstVisibleItemScrollOffset: Int,
+-        columns: Int,
+-        averageLineSizePx: Float,
+-        elapsedSeconds: Float
+-    ): Float {
+-        val safeColumns = columns.coerceAtLeast(1)
+-        val previous = previousIndex
+-        if (previous == null || previousColumns != safeColumns) {
+-            remember(firstVisibleItemIndex, firstVisibleItemScrollOffset, safeColumns)
+-            return 0f
++    fun beginSample() {
++        currentCount = 0
++    }
++
++    fun addVisibleLine(line: Int, mainAxisOffset: Int, mainAxisSize: Int) {
++        if (line < 0 || mainAxisSize <= 0) return
++        for (index in 0 until currentCount) {
++            if (currentLines[index] == line) {
++                currentOffsets[index] = minOf(currentOffsets[index], mainAxisOffset)
++                currentSizes[index] = maxOf(currentSizes[index], mainAxisSize)
++                return
++            }
+         }
++        if (currentCount == MAX_VISIBLE_LINES) return
++        currentLines[currentCount] = line
++        currentOffsets[currentCount] = mainAxisOffset
++        currentSizes[currentCount] = mainAxisSize
++        currentCount++
++    }
+ 
+-        val lineSize = averageLineSizePx.takeIf { it.isFinite() && it > 0f }
++    fun endSample(elapsedSeconds: Float, mainAxisSpacing: Int): Float {
+         val elapsed = elapsedSeconds.takeIf { it.isFinite() && it > 0f }
+-        val velocity = if (lineSize == null || elapsed == null) {
++        val distance = if (elapsed == null || previousCount == 0 || currentCount == 0) {
+             0f
+         } else {
+-            val previousRow = previous / safeColumns
+-            val currentRow = firstVisibleItemIndex / safeColumns
+-            val rowDistance = (currentRow - previousRow) * lineSize
+-            val offsetDistance = firstVisibleItemScrollOffset - previousOffset
+-            abs(rowDistance + offsetDistance) / elapsed
++            sharedLineDistance() ?: disjointLineDistance(mainAxisSpacing.coerceAtLeast(0))
+         }
+-
+-        remember(firstVisibleItemIndex, firstVisibleItemScrollOffset, safeColumns)
+-        return velocity
++        commitSample()
++        return if (elapsed == null) 0f else abs(distance) / elapsed
+     }
+ 
+     fun reset() {
+-        previousIndex = null
+-        previousOffset = 0
+-        previousColumns = 1
++        previousCount = 0
++        currentCount = 0
++    }
++
++    private fun sharedLineDistance(): Float? {
++        for (currentIndex in 0 until currentCount) {
++            for (previousIndex in 0 until previousCount) {
++                if (currentLines[currentIndex] == previousLines[previousIndex]) {
++                    return (previousOffsets[previousIndex] - currentOffsets[currentIndex]).toFloat()
++                }
++            }
++        }
++        return null
++    }
++
++    private fun disjointLineDistance(mainAxisSpacing: Int): Float {
++        val previousFirst = indexOfSmallestLine(previousLines, previousCount)
++        val previousLast = indexOfLargestLine(previousLines, previousCount)
++        val currentFirst = indexOfSmallestLine(currentLines, currentCount)
++        val currentLast = indexOfLargestLine(currentLines, currentCount)
++        return when {
++            currentLines[currentFirst] > previousLines[previousLast] -> {
++                val missingLines = currentLines[currentFirst] - previousLines[previousLast] - 1
++                val estimatedLineStride = averageVisibleLineSize() + mainAxisSpacing
++                previousOffsets[previousLast] + previousSizes[previousLast] + mainAxisSpacing +
++                    missingLines * estimatedLineStride - currentOffsets[currentFirst]
++            }
++            currentLines[currentLast] < previousLines[previousFirst] -> {
++                val missingLines = previousLines[previousFirst] - currentLines[currentLast] - 1
++                val estimatedLineStride = averageVisibleLineSize() + mainAxisSpacing
++                previousOffsets[previousFirst] -
++                    (currentOffsets[currentLast] + currentSizes[currentLast] + mainAxisSpacing +
++                        missingLines * estimatedLineStride)
++            }
++            else -> 0f
++        }.toFloat()
++    }
++
++    private fun averageVisibleLineSize(): Int {
++        var total = 0L
++        for (index in 0 until previousCount) total += previousSizes[index]
++        for (index in 0 until currentCount) total += currentSizes[index]
++        return (total / (previousCount + currentCount).coerceAtLeast(1)).toInt()
++    }
++
++    private fun commitSample() {
++        previousLines = currentLines.also { currentLines = previousLines }
++        previousOffsets = currentOffsets.also { currentOffsets = previousOffsets }
++        previousSizes = currentSizes.also { currentSizes = previousSizes }
++        previousCount = currentCount
++        currentCount = 0
++    }
++
++    private fun indexOfSmallestLine(lines: IntArray, count: Int): Int {
++        var result = 0
++        for (index in 1 until count) {
++            if (lines[index] < lines[result]) result = index
++        }
++        return result
++    }
++
++    private fun indexOfLargestLine(lines: IntArray, count: Int): Int {
++        var result = 0
++        for (index in 1 until count) {
++            if (lines[index] > lines[result]) result = index
++        }
++        return result
+     }
+ 
+-    private fun remember(index: Int, offset: Int, columns: Int) {
+-        previousIndex = index
+-        previousOffset = offset
+-        previousColumns = columns
++    private companion object {
++        const val MAX_VISIBLE_LINES = 128
+     }
+ }
+diff --git a/thumbnail-core/src/test/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerTest.kt b/thumbnail-core/src/test/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerTest.kt
+index afdaf87..96c8682 100644
+--- a/thumbnail-core/src/test/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerTest.kt
++++ b/thumbnail-core/src/test/kotlin/com/example/videoplayer/media/thumbnail/ThumbnailSchedulerTest.kt
+@@ -218,20 +218,14 @@ class ThumbnailSchedulerTest {
+         val tracker = GridScrollVelocityTracker()
+         val gate = FastScrollGate(enterVelocity = 1_800f)
+ 
+-        tracker.update(
+-            firstVisibleItemIndex = 0,
+-            firstVisibleItemScrollOffset = 190,
+-            columns = 4,
+-            averageLineSizePx = 200f,
+-            elapsedSeconds = 0f
+-        )
+-        val velocity = tracker.update(
+-            firstVisibleItemIndex = 4,
+-            firstVisibleItemScrollOffset = 10,
+-            columns = 4,
+-            averageLineSizePx = 200f,
+-            elapsedSeconds = 0.1f
+-        )
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 0, mainAxisOffset = -190, mainAxisSize = 200)
++        tracker.addVisibleLine(line = 1, mainAxisOffset = 10, mainAxisSize = 200)
++        tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 0)
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 1, mainAxisOffset = -10, mainAxisSize = 200)
++        tracker.addVisibleLine(line = 2, mainAxisOffset = 190, mainAxisSize = 200)
++        val velocity = tracker.endSample(elapsedSeconds = 0.1f, mainAxisSpacing = 0)
+ 
+         assertEquals(200f, velocity, 0.01f)
+         assertEquals(false, gate.update(isScrollInProgress = true, velocity = velocity))
+@@ -242,19 +236,57 @@ class ThumbnailSchedulerTest {
+         val tracker = GridScrollVelocityTracker()
+         val gate = FastScrollGate(enterVelocity = 1_800f)
+ 
+-        tracker.update(0, 0, columns = 4, averageLineSizePx = 200f, elapsedSeconds = 0f)
+-        val velocity = tracker.update(
+-            firstVisibleItemIndex = 12,
+-            firstVisibleItemScrollOffset = 20,
+-            columns = 4,
+-            averageLineSizePx = 200f,
+-            elapsedSeconds = 0.1f
+-        )
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 0, mainAxisOffset = 0, mainAxisSize = 200)
++        tracker.addVisibleLine(line = 1, mainAxisOffset = 200, mainAxisSize = 200)
++        tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 0)
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 3, mainAxisOffset = -20, mainAxisSize = 200)
++        tracker.addVisibleLine(line = 4, mainAxisOffset = 180, mainAxisSize = 200)
++        val velocity = tracker.endSample(elapsedSeconds = 0.1f, mainAxisSpacing = 0)
+ 
+         assertEquals(6_200f, velocity, 0.01f)
+         assertEquals(true, gate.update(isScrollInProgress = true, velocity = velocity))
+     }
+ 
++    @Test
++    fun visibleLineOffsetsStayContinuousWhenAFullSpanHeaderLeavesTheViewport() {
++        val tracker = GridScrollVelocityTracker()
++
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 0, mainAxisOffset = -38, mainAxisSize = 40)
++        tracker.addVisibleLine(line = 1, mainAxisOffset = 4, mainAxisSize = 100)
++        assertEquals(0f, tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 2), 0.01f)
++
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 1, mainAxisOffset = -6, mainAxisSize = 100)
++        tracker.addVisibleLine(line = 2, mainAxisOffset = 96, mainAxisSize = 100)
++        val velocity = tracker.endSample(elapsedSeconds = 0.1f, mainAxisSpacing = 2)
++
++        assertEquals(100f, velocity, 0.01f)
++    }
++
++    @Test
++    fun resettingVisibleLinesAfterColumnChangeDoesNotCreateAFakeFling() {
++        val tracker = GridScrollVelocityTracker()
++
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 4, mainAxisOffset = 0, mainAxisSize = 100)
++        tracker.addVisibleLine(line = 5, mainAxisOffset = 102, mainAxisSize = 100)
++        tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 2)
++
++        tracker.reset()
++        tracker.beginSample()
++        tracker.addVisibleLine(line = 2, mainAxisOffset = 0, mainAxisSize = 100)
++        tracker.addVisibleLine(line = 3, mainAxisOffset = 102, mainAxisSize = 100)
++
++        assertEquals(
++            0f,
++            tracker.endSample(elapsedSeconds = 0.01f, mainAxisSpacing = 2),
++            0.01f
++        )
++    }
++
+     private fun resource(name: String, version: Long) = ThumbnailResourceIdentity(
+         storageKey = "file:/$name.mp4",
+         uri = "content://media/external/video/$name",

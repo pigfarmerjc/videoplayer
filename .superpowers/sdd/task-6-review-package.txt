@@ -1,0 +1,2972 @@
+﻿COMMITS
+87519b6 test: activate video gallery benchmark
+27d3255 feat: redesign library as video timeline gallery
+2f6eede feat: define continuous gallery pinch state
+8b5f4cf fix: restore player screen compilation
+STAT
+ .../com/example/videoplayer/VideoGalleryUiTest.kt  |  102 ++
+ .../videoplayer/data/library/MediaLibraryState.kt  |    3 +
+ .../videoplayer/data/repository/MediaRepository.kt |    3 +
+ .../videoplayer/ui/gallery/TimelineScrubber.kt     |   95 ++
+ .../videoplayer/ui/gallery/VideoGalleryGrid.kt     |  361 ++++++
+ .../videoplayer/ui/gallery/VideoGalleryScreen.kt   |  272 ++++
+ .../videoplayer/ui/photos/PhotoGalleryScreen.kt    |  101 ++
+ .../videoplayer/ui/screens/GalleryPinchCompat.kt   |   31 +
+ .../example/videoplayer/ui/screens/MainScreen.kt   | 1332 +++++---------------
+ .../videoplayer/ui/screens/VideoPlayerScreen.kt    |    3 +-
+ .../java/com/example/videoplayer/ui/theme/Color.kt |    8 +
+ .../java/com/example/videoplayer/ui/theme/Theme.kt |   21 +-
+ .../java/com/example/videoplayer/ui/theme/Type.kt  |    9 +-
+ .../benchmark/VideoGalleryScrollBenchmark.kt       |   10 -
+ .../plans/2026-07-17-video-gallery-redesign.md     |   25 +-
+ .../videoplayer/ui/gallery/VideoGalleryState.kt    |   14 +
+ .../videoplayer/ui/gallery/VideoTimelineTest.kt    |   22 +
+ 17 files changed, 1391 insertions(+), 1021 deletions(-)
+DIFF
+diff --git a/app/src/androidTest/java/com/example/videoplayer/VideoGalleryUiTest.kt b/app/src/androidTest/java/com/example/videoplayer/VideoGalleryUiTest.kt
+new file mode 100644
+index 0000000..bc964f0
+--- /dev/null
++++ b/app/src/androidTest/java/com/example/videoplayer/VideoGalleryUiTest.kt
+@@ -0,0 +1,102 @@
++package com.example.videoplayer
++
++import android.net.Uri
++import androidx.compose.ui.test.assertIsDisplayed
++import androidx.compose.ui.test.junit4.createComposeRule
++import androidx.compose.ui.test.longClick
++import androidx.compose.ui.test.onNodeWithTag
++import androidx.compose.ui.test.performClick
++import androidx.compose.ui.test.performTouchInput
++import com.example.videoplayer.data.model.MediaItem
++import com.example.videoplayer.data.model.MediaType
++import com.example.videoplayer.ui.screens.MainGalleryContent
++import com.example.videoplayer.ui.theme.VideoPlayerTheme
++import org.junit.Rule
++import org.junit.Test
++
++class VideoGalleryUiTest {
++    @get:Rule
++    val composeRule = createComposeRule()
++
++    @Test
++    fun videoIsInitialDestinationWithoutSearchOrAudio() {
++        setGalleryContent()
++
++        composeRule.onNodeWithTag("video-gallery").assertIsDisplayed()
++        composeRule.onNodeWithTag("timeline-scrubber").assertIsDisplayed()
++        composeRule.onNodeWithTag("continue-watching").assertDoesNotExist()
++        composeRule.onNodeWithTag("search-action").assertDoesNotExist()
++        composeRule.onNodeWithTag("destination-audio").assertDoesNotExist()
++    }
++
++    @Test
++    fun continueWatchingOnlyAppearsForUnfinishedVideo() {
++        setGalleryContent(progress = mapOf(video.storageKey to 0.42f))
++
++        composeRule.onNodeWithTag("continue-watching").assertIsDisplayed()
++    }
++
++    @Test
++    fun longPressEntersSelectionMode() {
++        setGalleryContent()
++
++        composeRule.onNodeWithTag("video-item:${video.storageKey}")
++            .performTouchInput { longClick() }
++
++        composeRule.onNodeWithTag("selection-actions").assertIsDisplayed()
++    }
++
++    @Test
++    fun photosOpenAsDistinctDestination() {
++        setGalleryContent()
++
++        composeRule.onNodeWithTag("destination-photos").performClick()
++
++        composeRule.onNodeWithTag("photo-gallery").assertIsDisplayed()
++        composeRule.onNodeWithTag("video-gallery").assertDoesNotExist()
++    }
++
++    private fun setGalleryContent(progress: Map<String, Float> = emptyMap()) {
++        composeRule.setContent {
++            VideoPlayerTheme {
++                MainGalleryContent(
++                    videos = listOf(video),
++                    photos = listOf(photo),
++                    playbackProgress = progress,
++                    initialColumns = 4,
++                    onColumnsChange = {},
++                    onNavigateToVideo = { _, _ -> },
++                    onNavigateToPhoto = { _, _ -> },
++                    onNavigateToLibrary = {},
++                    onRefresh = {}
++                )
++            }
++        }
++    }
++
++    private companion object {
++        val video = MediaItem(
++            id = 7L,
++            uri = Uri.parse("content://media/video/7"),
++            title = "山间清晨",
++            displayName = "morning.mp4",
++            path = "/storage/emulated/0/Movies/morning.mp4",
++            folderName = "Movies",
++            size = 1_024L,
++            dateAdded = 1_700_000_000L,
++            duration = 90_000L,
++            type = MediaType.VIDEO
++        )
++        val photo = MediaItem(
++            id = 11L,
++            uri = Uri.parse("content://media/images/11"),
++            title = "海边",
++            displayName = "coast.jpg",
++            path = "/storage/emulated/0/Pictures/coast.jpg",
++            folderName = "Pictures",
++            size = 2_048L,
++            dateAdded = 1_699_000_000L,
++            type = MediaType.PHOTO
++        )
++    }
++}
+diff --git a/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt b/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt
+index ef03e25..4e3628e 100644
+--- a/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt
++++ b/app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt
+@@ -1,20 +1,23 @@
+ package com.example.videoplayer.data.library
+ 
+ data class LibraryMedia(
+     val id: String,
++    val mediaStoreId: Long = 0L,
++    val uri: String = "",
+     val title: String = "",
+     val displayName: String = "",
+     val path: String = "",
+     val folderName: String = "",
+     val size: Long = 0L,
+     val dateAdded: Long = 0L,
++    val dateModified: Long = dateAdded,
+     val duration: Long = 0L,
+     val resolution: String = ""
+ )
+ 
+ data class MediaLibraryState(
+     val generation: Long = 0L,
+     val videos: List<LibraryMedia> = emptyList(),
+     val photos: List<LibraryMedia> = emptyList(),
+     val isRefreshing: Boolean = false,
+     val error: LibraryError? = null
+diff --git a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+index 3291545..3c419be 100644
+--- a/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
++++ b/app/src/main/java/com/example/videoplayer/data/repository/MediaRepository.kt
+@@ -734,26 +734,29 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
+     private fun RepositoryScanResult.items(): List<MediaItem> =
+         videos.itemsOrEmpty() + photos.itemsOrEmpty()
+ 
+     private fun RepositoryQueryResult.itemsOrEmpty(): List<MediaItem> = when (this) {
+         is RepositoryQueryResult.Success -> items
+         is RepositoryQueryResult.Failure -> emptyList()
+     }
+ 
+     private fun MediaItem.toLibraryMedia(): LibraryMedia = LibraryMedia(
+         id = storageKey,
++        mediaStoreId = id,
++        uri = uri.toString(),
+         title = title,
+         displayName = displayName,
+         path = path,
+         folderName = folderName,
+         size = size,
+         dateAdded = dateAdded,
++        dateModified = dateModified,
+         duration = duration,
+         resolution = resolution
+     )
+ 
+     private data class RepositoryScanResult(
+         val videos: RepositoryQueryResult,
+         val photos: RepositoryQueryResult
+     )
+ 
+     private sealed interface RepositoryQueryResult {
+diff --git a/app/src/main/java/com/example/videoplayer/ui/gallery/TimelineScrubber.kt b/app/src/main/java/com/example/videoplayer/ui/gallery/TimelineScrubber.kt
+new file mode 100644
+index 0000000..44e086c
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/ui/gallery/TimelineScrubber.kt
+@@ -0,0 +1,95 @@
++package com.example.videoplayer.ui.gallery
++
++import androidx.compose.animation.AnimatedVisibility
++import androidx.compose.animation.fadeIn
++import androidx.compose.animation.fadeOut
++import androidx.compose.foundation.background
++import androidx.compose.foundation.gestures.detectVerticalDragGestures
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.geometry.Offset
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.layout.onSizeChanged
++import androidx.compose.ui.platform.testTag
++import androidx.compose.ui.unit.dp
++import com.example.videoplayer.ui.theme.GalleryIceBlue
++import com.example.videoplayer.ui.theme.GalleryRaisedSurface
++import kotlinx.coroutines.delay
++
++@Composable
++internal fun TimelineScrubber(
++    sections: List<VideoSection<GalleryVideo>>,
++    activeSectionIndex: Int,
++    isScrolling: Boolean,
++    onSectionSelected: (Int) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    var visible by remember { mutableStateOf(true) }
++    var heightPx by remember { mutableIntStateOf(1) }
++
++    LaunchedEffect(activeSectionIndex, isScrolling) {
++        visible = true
++        if (!isScrolling) {
++            delay(1_600)
++            visible = false
++        }
++    }
++
++    AnimatedVisibility(
++        visible = visible || isScrolling,
++        enter = fadeIn(),
++        exit = fadeOut(),
++        modifier = modifier.testTag("timeline-scrubber")
++    ) {
++        Column(
++            verticalArrangement = Arrangement.spacedBy(4.dp),
++            modifier = Modifier
++                .background(GalleryRaisedSurface.copy(alpha = 0.9f), RoundedCornerShape(10.dp))
++                .padding(horizontal = 5.dp, vertical = 7.dp)
++                .onSizeChanged { heightPx = it.height.coerceAtLeast(1) }
++                .pointerInput(sections.size, heightPx) {
++                    fun select(position: Offset) {
++                        if (sections.isEmpty()) return
++                        val index = ((position.y / heightPx) * sections.size)
++                            .toInt()
++                            .coerceIn(0, sections.lastIndex)
++                        visible = true
++                        onSectionSelected(index)
++                    }
++                    detectVerticalDragGestures(
++                        onDragStart = { select(it) },
++                        onVerticalDrag = { change, _ -> select(change.position) }
++                    )
++                }
++        ) {
++            sections.forEachIndexed { index, _ ->
++                Box(
++                    Modifier
++                        .size(
++                            width = if (index == activeSectionIndex) 4.dp else 2.dp,
++                            height = if (index == activeSectionIndex) 16.dp else 10.dp
++                        )
++                        .background(
++                            color = GalleryIceBlue.copy(
++                                alpha = if (index == activeSectionIndex) 1f else 0.42f
++                            ),
++                            shape = RoundedCornerShape(2.dp)
++                        )
++                )
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryGrid.kt b/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryGrid.kt
+new file mode 100644
+index 0000000..c60e4c4
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryGrid.kt
+@@ -0,0 +1,361 @@
++package com.example.videoplayer.ui.gallery
++
++import android.graphics.Bitmap
++import androidx.compose.foundation.Image
++import androidx.compose.foundation.background
++import androidx.compose.foundation.gestures.awaitEachGesture
++import androidx.compose.foundation.gestures.awaitFirstDown
++import androidx.compose.foundation.gestures.calculateZoom
++import androidx.compose.foundation.gestures.detectTapGestures
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.aspectRatio
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.lazy.grid.GridCells
++import androidx.compose.foundation.lazy.grid.GridItemSpan
++import androidx.compose.foundation.lazy.grid.LazyGridState
++import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
++import androidx.compose.foundation.lazy.grid.items
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.Check
++import androidx.compose.material3.Icon
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableFloatStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.runtime.snapshotFlow
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.graphics.asImageBitmap
++import androidx.compose.ui.graphics.graphicsLayer
++import androidx.compose.ui.graphics.painter.BitmapPainter
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.input.pointer.positionChanged
++import androidx.compose.ui.layout.ContentScale
++import androidx.compose.ui.layout.onSizeChanged
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.platform.testTag
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import com.example.videoplayer.data.model.MediaItem
++import com.example.videoplayer.media.thumbnail.ThumbnailPriority
++import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
++import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
++import com.example.videoplayer.media.thumbnail.ThumbnailSize
++import com.example.videoplayer.ui.components.formatDuration
++import com.example.videoplayer.ui.theme.GalleryBackground
++import com.example.videoplayer.ui.theme.GalleryIceBlue
++import com.example.videoplayer.ui.theme.GallerySurface
++import com.example.videoplayer.ui.theme.GalleryText
++import com.example.videoplayer.ui.theme.GalleryTextMuted
++import kotlinx.coroutines.flow.collectLatest
++import kotlin.math.abs
++
++internal data class GalleryVideo(
++    val media: MediaItem
++) : VideoTimelineItem {
++    override val id: String = media.storageKey
++    override val dateAddedEpochSeconds: Long = media.dateAdded
++}
++
++private sealed interface TimelineEntry {
++    val stableKey: String
++
++    data class Header(val section: VideoSection<GalleryVideo>) : TimelineEntry {
++        override val stableKey: String = "header:${section.stableKey}"
++    }
++
++    data class Video(val item: GalleryVideo) : TimelineEntry {
++        override val stableKey: String = "video:${item.media.resourceVersionKey}"
++    }
++}
++
++@Composable
++internal fun VideoGalleryGrid(
++    sections: List<VideoSection<GalleryVideo>>,
++    columnCount: Int,
++    selectedKeys: Set<String>,
++    progress: Map<String, Float>,
++    state: LazyGridState,
++    onColumnsChange: (Int) -> Unit,
++    onVideoClick: (MediaItem) -> Unit,
++    onVideoLongClick: (MediaItem) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val entries = remember(sections) {
++        buildList {
++            sections.forEach { section ->
++                add(TimelineEntry.Header(section))
++                section.items.forEach { add(TimelineEntry.Video(it)) }
++            }
++        }
++    }
++    val activeSection by remember(entries, state) {
++        androidx.compose.runtime.derivedStateOf {
++            entries.take(state.firstVisibleItemIndex + 1)
++                .filterIsInstance<TimelineEntry.Header>()
++                .lastOrNull()
++                ?.section
++                ?: sections.firstOrNull()
++        }
++    }
++    var presentationScale by remember { mutableFloatStateOf(1f) }
++    var previewColumns by remember(columnCount) { mutableFloatStateOf(columnCount.toFloat()) }
++    val scrollController = remember {
++        ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
++    }
++
++    DisposableEffect(scrollController) {
++        onDispose { scrollController.onScrollInProgressChanged(false) }
++    }
++    LaunchedEffect(state) {
++        var previousPosition = 0
++        var previousTime = System.nanoTime()
++        snapshotFlow {
++            Triple(state.isScrollInProgress, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset)
++        }.collect { (scrolling, index, offset) ->
++            val now = System.nanoTime()
++            val elapsedSeconds = ((now - previousTime).coerceAtLeast(1L)) / 1_000_000_000f
++            val position = index * 1_000 + offset
++            val velocity = abs(position - previousPosition) / elapsedSeconds
++            val fastScrolling = scrolling && (velocity > 800f || state.isScrollInProgress)
++            scrollController.onScrollInProgressChanged(fastScrolling)
++            previousPosition = position
++            previousTime = now
++        }
++    }
++
++    Box(modifier = modifier.background(GalleryBackground)) {
++        LazyVerticalGrid(
++            columns = GridCells.Fixed(columnCount),
++            state = state,
++            horizontalArrangement = Arrangement.spacedBy(2.dp),
++            verticalArrangement = Arrangement.spacedBy(2.dp),
++            contentPadding = PaddingValues(top = 36.dp, bottom = 116.dp),
++            modifier = Modifier
++                .fillMaxSize()
++                .galleryPinch(
++                    columnCount = columnCount,
++                    onPreview = { columns ->
++                        previewColumns = columns
++                        presentationScale = (columnCount / columns).coerceIn(0.5f, 2f)
++                    },
++                    onCommit = { columns ->
++                        onColumnsChange(columns)
++                        presentationScale = 1f
++                        previewColumns = columns.toFloat()
++                    }
++                )
++                .graphicsLayer {
++                    scaleX = presentationScale
++                    scaleY = presentationScale
++                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
++                }
++        ) {
++            items(
++                items = entries,
++                key = { it.stableKey },
++                contentType = { if (it is TimelineEntry.Header) "date-header" else "video-thumbnail" },
++                span = { entry ->
++                    if (entry is TimelineEntry.Header) GridItemSpan(maxLineSpan) else GridItemSpan(1)
++                }
++            ) { entry ->
++                when (entry) {
++                    is TimelineEntry.Header -> DateSectionHeader(entry.section)
++                    is TimelineEntry.Video -> VideoThumbnailItem(
++                        item = entry.item.media,
++                        selected = entry.item.id in selectedKeys,
++                        progress = progress[entry.item.id] ?: 0f,
++                        onClick = { onVideoClick(entry.item.media) },
++                        onLongClick = { onVideoLongClick(entry.item.media) }
++                    )
++                }
++            }
++        }
++
++        activeSection?.let { section ->
++            Text(
++                text = sectionTitle(section),
++                color = GalleryText,
++                fontSize = 15.sp,
++                fontWeight = FontWeight.SemiBold,
++                modifier = Modifier
++                    .align(Alignment.TopStart)
++                    .fillMaxWidth()
++                    .background(GalleryBackground.copy(alpha = 0.96f))
++                    .padding(horizontal = 14.dp, vertical = 8.dp)
++                    .testTag("sticky-date-header")
++            )
++        }
++
++        if (presentationScale != 1f) {
++            Text(
++                text = "${previewColumns.toInt().coerceIn(2, 8)} 列",
++                color = GalleryBackground,
++                fontSize = 12.sp,
++                fontWeight = FontWeight.Bold,
++                modifier = Modifier
++                    .align(Alignment.TopEnd)
++                    .padding(10.dp)
++                    .clip(RoundedCornerShape(14.dp))
++                    .background(GalleryIceBlue)
++                    .padding(horizontal = 10.dp, vertical = 5.dp)
++            )
++        }
++    }
++}
++
++@Composable
++private fun DateSectionHeader(section: VideoSection<GalleryVideo>) {
++    Text(
++        text = sectionTitle(section),
++        color = GalleryTextMuted,
++        fontSize = 12.sp,
++        fontWeight = FontWeight.Medium,
++        modifier = Modifier
++            .fillMaxWidth()
++            .background(GalleryBackground)
++            .padding(horizontal = 14.dp, vertical = 10.dp)
++    )
++}
++
++@Composable
++private fun VideoThumbnailItem(
++    item: MediaItem,
++    selected: Boolean,
++    progress: Float,
++    onClick: () -> Unit,
++    onLongClick: () -> Unit
++) {
++    Box(
++        modifier = Modifier
++            .fillMaxWidth()
++            .aspectRatio(1f)
++            .clip(RoundedCornerShape(2.dp))
++            .background(GallerySurface)
++            .pointerInput(item.resourceVersionKey, selected) {
++                detectTapGestures(onLongPress = { onLongClick() }, onTap = { onClick() })
++            }
++            .testTag("video-item:${item.storageKey}")
++    ) {
++        GalleryThumbnail(item = item, modifier = Modifier.fillMaxSize())
++        Text(
++            text = formatDuration(item.duration),
++            color = Color.White,
++            fontSize = 10.sp,
++            fontWeight = FontWeight.Medium,
++            modifier = Modifier
++                .align(Alignment.BottomEnd)
++                .padding(end = 5.dp, bottom = 6.dp)
++                .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(3.dp))
++                .padding(horizontal = 4.dp, vertical = 2.dp)
++        )
++        if (progress > 0f) {
++            Box(
++                Modifier
++                    .align(Alignment.BottomStart)
++                    .fillMaxWidth(progress.coerceIn(0f, 1f))
++                    .height(3.dp)
++                    .background(GalleryIceBlue)
++            )
++        }
++        if (selected) {
++            Box(
++                modifier = Modifier
++                    .align(Alignment.TopEnd)
++                    .padding(6.dp)
++                    .clip(RoundedCornerShape(12.dp))
++                    .background(GalleryIceBlue)
++                    .padding(3.dp)
++            ) {
++                Icon(Icons.Default.Check, contentDescription = "已选择", tint = GalleryBackground)
++            }
++        }
++    }
++}
++
++@Composable
++internal fun GalleryThumbnail(item: MediaItem, modifier: Modifier = Modifier) {
++    val context = LocalContext.current
++    var bitmap by remember(item.resourceVersionKey) { mutableStateOf<Bitmap?>(null) }
++    var thumbnailSize by remember { mutableStateOf(ThumbnailSize(360, 360)) }
++
++    LaunchedEffect(item.resourceVersionKey, thumbnailSize) {
++        bitmap = null
++        ThumbnailSchedulerProvider.request(
++            context = context,
++            item = item,
++            size = thumbnailSize,
++            priority = ThumbnailPriority.VISIBLE
++        ).collectLatest { bitmap = it.value }
++    }
++
++    Box(
++        modifier = modifier
++            .background(GallerySurface)
++            .onSizeChanged { size ->
++                if (size.width > 0 && size.height > 0) {
++                    thumbnailSize = ThumbnailSize(size.width, size.height)
++                }
++            }
++    ) {
++        bitmap?.let { image ->
++            Image(
++                painter = BitmapPainter(image.asImageBitmap()),
++                contentDescription = item.title.ifBlank { item.displayName },
++                contentScale = ContentScale.Crop,
++                modifier = Modifier.fillMaxSize()
++            )
++        }
++    }
++}
++
++private fun Modifier.galleryPinch(
++    columnCount: Int,
++    onPreview: (Float) -> Unit,
++    onCommit: (Int) -> Unit
++): Modifier = pointerInput(columnCount) {
++    awaitEachGesture {
++        awaitFirstDown(requireUnconsumed = false)
++        var cumulativeZoom = 1f
++        var previewColumns = columnCount.toFloat()
++        var pinching = false
++        do {
++            val event = awaitPointerEvent()
++            if (event.changes.count { it.pressed } >= 2) {
++                pinching = true
++                cumulativeZoom *= event.calculateZoom()
++                previewColumns = previewGalleryColumnCount(columnCount, cumulativeZoom)
++                onPreview(previewColumns)
++                event.changes.forEach { change ->
++                    if (change.positionChanged()) change.consume()
++                }
++            }
++        } while (event.changes.any { it.pressed })
++
++        if (pinching) onCommit(commitGalleryColumnCount(previewColumns))
++    }
++}
++
++internal val MediaItem.resourceVersionKey: String
++    get() = "$storageKey|$uri|$dateModified"
++
++internal fun sectionTitle(section: VideoSection<GalleryVideo>): String = when (val key = section.key) {
++    VideoSectionKey.Today -> "今天"
++    VideoSectionKey.Yesterday -> "昨天"
++    VideoSectionKey.ThisWeek -> "本周"
++    is VideoSectionKey.Month -> "${key.yearMonth.year} 年 ${key.yearMonth.monthValue} 月"
++}
+diff --git a/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryScreen.kt b/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryScreen.kt
+new file mode 100644
+index 0000000..a9b006e
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/ui/gallery/VideoGalleryScreen.kt
+@@ -0,0 +1,272 @@
++package com.example.videoplayer.ui.gallery
++
++import androidx.compose.animation.AnimatedVisibility
++import androidx.compose.animation.fadeIn
++import androidx.compose.animation.fadeOut
++import androidx.compose.animation.slideInVertically
++import androidx.compose.animation.slideOutVertically
++import androidx.compose.foundation.background
++import androidx.compose.foundation.gestures.detectTapGestures
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.lazy.LazyRow
++import androidx.compose.foundation.lazy.grid.rememberLazyGridState
++import androidx.compose.foundation.lazy.items
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.filled.Close
++import androidx.compose.material.icons.filled.DeleteOutline
++import androidx.compose.material.icons.filled.PlaylistAdd
++import androidx.compose.material.icons.filled.Share
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.ExperimentalComposeUiApi
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.platform.LocalHapticFeedback
++import androidx.compose.ui.platform.testTag
++import androidx.compose.ui.semantics.Role
++import androidx.compose.ui.semantics.role
++import androidx.compose.ui.semantics.semantics
++import androidx.compose.ui.semantics.testTagsAsResourceId
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.text.font.FontWeight
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import androidx.compose.ui.hapticfeedback.HapticFeedbackType
++import com.example.videoplayer.data.model.MediaItem
++import com.example.videoplayer.ui.components.formatDuration
++import com.example.videoplayer.ui.theme.GalleryBackground
++import com.example.videoplayer.ui.theme.GalleryIceBlue
++import com.example.videoplayer.ui.theme.GalleryRaisedSurface
++import com.example.videoplayer.ui.theme.GalleryText
++import com.example.videoplayer.ui.theme.GalleryTextMuted
++import java.time.Instant
++import java.time.ZoneId
++import kotlinx.coroutines.launch
++
++@OptIn(ExperimentalComposeUiApi::class)
++@Composable
++fun VideoGalleryScreen(
++    videos: List<MediaItem>,
++    playbackProgress: Map<String, Float>,
++    columnCount: Int,
++    onColumnsChange: (Int) -> Unit,
++    onNavigateToVideo: (Long, String) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val galleryVideos = remember(videos) { videos.map(::GalleryVideo) }
++    val sections = remember(galleryVideos) {
++        groupVideos(galleryVideos, ZoneId.systemDefault(), Instant.now())
++    }
++    val continueWatching = remember(galleryVideos, playbackProgress) {
++        deriveContinueWatching(galleryVideos, playbackProgress)
++    }
++    val gridState = rememberLazyGridState()
++    val scope = rememberCoroutineScope()
++    val haptics = LocalHapticFeedback.current
++    var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
++    val sectionStarts = remember(sections) {
++        buildList {
++            var itemIndex = 0
++            sections.forEach { section ->
++                add(itemIndex)
++                itemIndex += section.items.size + 1
++            }
++        }
++    }
++
++    Box(
++        modifier = modifier
++            .fillMaxSize()
++            .background(GalleryBackground)
++            .semantics { testTagsAsResourceId = true }
++            .testTag("video-gallery")
++    ) {
++        Column(Modifier.fillMaxSize()) {
++            if (continueWatching.isNotEmpty()) {
++                ContinueWatchingRow(
++                    items = continueWatching,
++                    onVideoClick = { item -> onNavigateToVideo(item.id, item.folderName) }
++                )
++            }
++            Box(Modifier.weight(1f)) {
++                VideoGalleryGrid(
++                    sections = sections,
++                    columnCount = columnCount,
++                    selectedKeys = selectedKeys,
++                    progress = playbackProgress,
++                    state = gridState,
++                    onColumnsChange = onColumnsChange,
++                    onVideoClick = { item ->
++                        if (selectedKeys.isEmpty()) {
++                            onNavigateToVideo(item.id, item.folderName)
++                        } else {
++                            selectedKeys = selectedKeys.toggle(item.storageKey)
++                        }
++                    },
++                    onVideoLongClick = { item ->
++                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
++                        selectedKeys = selectedKeys.toggle(item.storageKey)
++                    },
++                    modifier = Modifier.fillMaxSize()
++                )
++
++                TimelineScrubber(
++                    sections = sections,
++                    activeSectionIndex = sectionStarts.indexOfLast {
++                        it <= gridState.firstVisibleItemIndex
++                    }.coerceAtLeast(0),
++                    isScrolling = gridState.isScrollInProgress,
++                    onSectionSelected = { sectionIndex ->
++                        scope.launch {
++                            gridState.scrollToItem(sectionStarts.getOrElse(sectionIndex) { 0 })
++                        }
++                    },
++                    modifier = Modifier
++                        .align(Alignment.CenterEnd)
++                        .padding(end = 5.dp)
++                )
++            }
++        }
++
++        AnimatedVisibility(
++            visible = selectedKeys.isNotEmpty(),
++            enter = fadeIn() + slideInVertically { it / 2 },
++            exit = fadeOut() + slideOutVertically { it / 2 },
++            modifier = Modifier
++                .align(Alignment.BottomCenter)
++                .padding(horizontal = 16.dp, vertical = 14.dp)
++        ) {
++            SelectionActionSurface(
++                selectedCount = selectedKeys.size,
++                onClear = { selectedKeys = emptySet() }
++            )
++        }
++    }
++}
++
++@Composable
++private fun ContinueWatchingRow(
++    items: List<ContinueWatchingVideo<GalleryVideo>>,
++    onVideoClick: (MediaItem) -> Unit
++) {
++    Column(
++        modifier = Modifier
++            .fillMaxWidth()
++            .padding(top = 8.dp)
++            .testTag("continue-watching")
++    ) {
++        Text(
++            text = "继续观看",
++            color = GalleryText,
++            fontSize = 15.sp,
++            fontWeight = FontWeight.SemiBold,
++            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
++        )
++        LazyRow(
++            horizontalArrangement = Arrangement.spacedBy(8.dp),
++            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp)
++        ) {
++            items(items, key = { it.video.media.resourceVersionKey }) { entry ->
++                Column(
++                    modifier = Modifier
++                        .width(156.dp)
++                        .clip(RoundedCornerShape(5.dp))
++                        .background(GalleryRaisedSurface)
++                        .semantics { role = Role.Button }
++                        .then(
++                            Modifier.pointerInput(entry.video.id) {
++                                detectTapGestures {
++                                    onVideoClick(entry.video.media)
++                                }
++                            }
++                        )
++                ) {
++                    Box(
++                        Modifier
++                            .fillMaxWidth()
++                            .height(88.dp)
++                    ) {
++                        GalleryThumbnail(entry.video.media, Modifier.fillMaxSize())
++                        Text(
++                            text = formatDuration(entry.video.media.duration),
++                            color = Color.White,
++                            fontSize = 10.sp,
++                            modifier = Modifier
++                                .align(Alignment.BottomEnd)
++                                .padding(5.dp)
++                                .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(3.dp))
++                                .padding(horizontal = 4.dp, vertical = 2.dp)
++                        )
++                        Box(
++                            Modifier
++                                .align(Alignment.BottomStart)
++                                .fillMaxWidth(entry.progress.coerceIn(0f, 1f))
++                                .height(3.dp)
++                                .background(GalleryIceBlue)
++                        )
++                    }
++                    Text(
++                        text = entry.video.media.title.ifBlank { entry.video.media.displayName },
++                        color = GalleryText,
++                        fontSize = 12.sp,
++                        maxLines = 1,
++                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp)
++                    )
++                }
++            }
++        }
++        Spacer(Modifier.height(6.dp))
++    }
++}
++
++@Composable
++private fun SelectionActionSurface(selectedCount: Int, onClear: () -> Unit) {
++    Row(
++        verticalAlignment = Alignment.CenterVertically,
++        horizontalArrangement = Arrangement.spacedBy(4.dp),
++        modifier = Modifier
++            .clip(RoundedCornerShape(22.dp))
++            .background(GalleryRaisedSurface.copy(alpha = 0.98f))
++            .padding(horizontal = 8.dp, vertical = 5.dp)
++            .testTag("selection-actions")
++    ) {
++        IconButton(onClick = onClear, modifier = Modifier.size(40.dp)) {
++            Icon(Icons.Default.Close, contentDescription = "退出选择", tint = GalleryText)
++        }
++        Text("已选择 $selectedCount 项", color = GalleryText, fontSize = 13.sp)
++        Spacer(Modifier.weight(1f))
++        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
++            Icon(Icons.Default.Share, contentDescription = "分享", tint = GalleryTextMuted)
++        }
++        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
++            Icon(Icons.Default.PlaylistAdd, contentDescription = "加入播放列表", tint = GalleryTextMuted)
++        }
++        IconButton(onClick = {}, modifier = Modifier.size(40.dp)) {
++            Icon(Icons.Default.DeleteOutline, contentDescription = "删除", tint = GalleryTextMuted)
++        }
++    }
++}
++
++private fun Set<String>.toggle(key: String): Set<String> =
++    if (key in this) this - key else this + key
+diff --git a/app/src/main/java/com/example/videoplayer/ui/photos/PhotoGalleryScreen.kt b/app/src/main/java/com/example/videoplayer/ui/photos/PhotoGalleryScreen.kt
+new file mode 100644
+index 0000000..bfe9c46
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/ui/photos/PhotoGalleryScreen.kt
+@@ -0,0 +1,101 @@
++package com.example.videoplayer.ui.photos
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.gestures.detectTapGestures
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.aspectRatio
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.lazy.grid.GridCells
++import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
++import androidx.compose.foundation.lazy.grid.items
++import androidx.compose.foundation.lazy.grid.rememberLazyGridState
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.snapshotFlow
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.input.pointer.pointerInput
++import androidx.compose.ui.platform.testTag
++import androidx.compose.ui.unit.dp
++import com.example.videoplayer.data.model.MediaItem
++import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
++import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
++import com.example.videoplayer.ui.gallery.GalleryThumbnail
++import com.example.videoplayer.ui.gallery.resourceVersionKey
++import com.example.videoplayer.ui.theme.GalleryBackground
++import com.example.videoplayer.ui.theme.GallerySurface
++import com.example.videoplayer.ui.theme.GalleryTextMuted
++
++@Composable
++fun PhotoGalleryScreen(
++    photos: List<MediaItem>,
++    onNavigateToPhoto: (Long, String) -> Unit,
++    modifier: Modifier = Modifier
++) {
++    val state = rememberLazyGridState()
++    val scrollController = remember {
++        ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
++    }
++
++    DisposableEffect(scrollController) {
++        onDispose { scrollController.onScrollInProgressChanged(false) }
++    }
++    LaunchedEffect(state) {
++        snapshotFlow { state.isScrollInProgress }.collect {
++            scrollController.onScrollInProgressChanged(it)
++        }
++    }
++
++    Box(
++        modifier = modifier
++            .fillMaxSize()
++            .background(GalleryBackground)
++            .testTag("photo-gallery")
++    ) {
++        if (photos.isEmpty()) {
++            Text(
++                text = "这里还没有照片",
++                color = GalleryTextMuted,
++                modifier = Modifier.align(Alignment.Center)
++            )
++        } else {
++            LazyVerticalGrid(
++                columns = GridCells.Fixed(3),
++                state = state,
++                horizontalArrangement = Arrangement.spacedBy(2.dp),
++                verticalArrangement = Arrangement.spacedBy(2.dp),
++                contentPadding = PaddingValues(bottom = 104.dp),
++                modifier = Modifier.fillMaxSize()
++            ) {
++                items(
++                    items = photos,
++                    key = { it.resourceVersionKey },
++                    contentType = { "photo-thumbnail" }
++                ) { photo ->
++                    Box(
++                        modifier = Modifier
++                            .aspectRatio(1f)
++                            .clip(RoundedCornerShape(2.dp))
++                            .background(GallerySurface)
++                            .pointerInput(photo.resourceVersionKey) {
++                                detectTapGestures {
++                                    onNavigateToPhoto(photo.id, photo.folderName)
++                                }
++                            }
++                            .testTag("photo-item:${photo.storageKey}")
++                    ) {
++                        GalleryThumbnail(photo, Modifier.fillMaxSize())
++                    }
++                }
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/GalleryPinchCompat.kt b/app/src/main/java/com/example/videoplayer/ui/screens/GalleryPinchCompat.kt
+new file mode 100644
+index 0000000..0a7e002
+--- /dev/null
++++ b/app/src/main/java/com/example/videoplayer/ui/screens/GalleryPinchCompat.kt
+@@ -0,0 +1,31 @@
++package com.example.videoplayer.ui.screens
++
++import androidx.compose.foundation.gestures.awaitEachGesture
++import androidx.compose.foundation.gestures.awaitFirstDown
++import androidx.compose.foundation.gestures.calculateZoom
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.input.pointer.pointerInput
++import com.example.videoplayer.ui.gallery.commitGalleryColumnCount
++import com.example.videoplayer.ui.gallery.previewGalleryColumnCount
++
++fun Modifier.pinchToZoomColumns(
++    columns: Int,
++    onColumnsChange: (Int) -> Unit
++): Modifier = pointerInput(columns) {
++    awaitEachGesture {
++        awaitFirstDown(requireUnconsumed = false)
++        var cumulativeZoom = 1f
++        var previewColumns = columns.toFloat()
++        var pinching = false
++        do {
++            val event = awaitPointerEvent()
++            if (event.changes.count { it.pressed } >= 2) {
++                pinching = true
++                cumulativeZoom *= event.calculateZoom()
++                previewColumns = previewGalleryColumnCount(columns, cumulativeZoom)
++            }
++        } while (event.changes.any { it.pressed })
++
++        if (pinching) onColumnsChange(commitGalleryColumnCount(previewColumns))
++    }
++}
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+index 75f1429..78f6829 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/screens/MainScreen.kt
+@@ -1,1110 +1,460 @@
+ package com.example.videoplayer.ui.screens
+ 
+ import android.Manifest
+ import android.content.pm.PackageManager
++import android.net.Uri
+ import android.os.Build
+ import androidx.activity.compose.rememberLauncherForActivityResult
+ import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.compose.foundation.background
+-import androidx.compose.foundation.clickable
+-import androidx.compose.foundation.border
+-import androidx.compose.foundation.layout.*
+-import androidx.compose.foundation.lazy.LazyColumn
+-import androidx.compose.foundation.lazy.rememberLazyListState
+-import androidx.compose.foundation.lazy.grid.GridCells
+-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+-import androidx.compose.foundation.lazy.grid.items as gridItems
+-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+-import androidx.compose.foundation.lazy.items
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.RowScope
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
+ import androidx.compose.foundation.shape.RoundedCornerShape
+ import androidx.compose.material.icons.Icons
+-import androidx.compose.material.icons.automirrored.filled.Sort
+-import androidx.compose.material.icons.automirrored.filled.ViewList
+-import androidx.compose.material.icons.filled.Close
++import androidx.compose.material.icons.filled.Collections
++import androidx.compose.material.icons.filled.FavoriteBorder
+ import androidx.compose.material.icons.filled.Folder
+-import androidx.compose.material.icons.filled.GridView
++import androidx.compose.material.icons.filled.History
+ import androidx.compose.material.icons.filled.Image
+-import androidx.compose.material.icons.filled.Info
+-import androidx.compose.material.icons.filled.Lock
+-import androidx.compose.material.icons.filled.MusicNote
+-import androidx.compose.material.icons.filled.PlayCircle
++import androidx.compose.material.icons.filled.PlayCircleOutline
++import androidx.compose.material.icons.filled.PlaylistPlay
+ import androidx.compose.material.icons.filled.Refresh
+-import androidx.compose.material.icons.filled.Search
+ import androidx.compose.material.icons.filled.Settings
+-import androidx.compose.material.icons.filled.Star
+-import androidx.compose.material3.*
+-import androidx.compose.runtime.*
++import androidx.compose.material3.Button
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.NavigationBar
++import androidx.compose.material3.NavigationBarItem
++import androidx.compose.material3.NavigationBarItemDefaults
++import androidx.compose.material3.Scaffold
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
+ import androidx.compose.ui.draw.clip
+-import androidx.compose.ui.draw.shadow
+-import androidx.compose.ui.graphics.Color
+-import androidx.compose.ui.graphics.Brush
+-import androidx.compose.ui.graphics.graphicsLayer
+-import androidx.compose.foundation.shape.CircleShape
+-import androidx.compose.ui.text.TextStyle
+ import androidx.compose.ui.graphics.vector.ImageVector
+-import androidx.compose.ui.layout.ContentScale
+ import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.platform.testTag
+ import androidx.compose.ui.text.font.FontWeight
+-import androidx.compose.ui.text.style.TextAlign
+ import androidx.compose.ui.unit.dp
+ import androidx.compose.ui.unit.sp
+ import androidx.core.content.ContextCompat
+-import coil.compose.AsyncImage
+-import com.example.videoplayer.data.model.MediaFolder
++import com.example.videoplayer.data.library.LibraryMedia
++import com.example.videoplayer.data.library.MediaLibraryStore
+ import com.example.videoplayer.data.model.MediaItem
+ import com.example.videoplayer.data.model.MediaType
+ import com.example.videoplayer.data.repository.MediaRepository
+-import com.example.videoplayer.data.model.LayoutMode
+-import com.example.videoplayer.ui.components.MediaGalleryTile
+-import androidx.compose.material.icons.filled.Collections
+-import androidx.compose.foundation.gestures.awaitEachGesture
+-import androidx.compose.foundation.gestures.awaitFirstDown
+-import androidx.compose.ui.input.pointer.pointerInput
+-import com.example.videoplayer.ui.components.FolderCard
+-import com.example.videoplayer.ui.components.FolderGridTile
+-import com.example.videoplayer.ui.components.GlassmorphicCard
+-import com.example.videoplayer.ui.components.AppBackground
+-import com.example.videoplayer.ui.components.MediaGridTile
+-import com.example.videoplayer.ui.components.MediaItemCard
+-import com.example.videoplayer.ui.components.mediaPreviewRequest
+-import com.example.videoplayer.ui.components.bounceClick
+-import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
+-import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
+-import com.example.videoplayer.ui.theme.*
+-import kotlinx.coroutines.delay
+-import kotlinx.coroutines.launch
++import com.example.videoplayer.ui.gallery.VideoGalleryScreen
++import com.example.videoplayer.ui.gallery.GalleryColumnStore
++import com.example.videoplayer.ui.gallery.readClampedColumnCount
++import com.example.videoplayer.ui.photos.PhotoGalleryScreen
++import com.example.videoplayer.ui.theme.GalleryBackground
++import com.example.videoplayer.ui.theme.GalleryIceBlue
++import com.example.videoplayer.ui.theme.GalleryRaisedSurface
++import com.example.videoplayer.ui.theme.GallerySurface
++import com.example.videoplayer.ui.theme.GalleryText
++import com.example.videoplayer.ui.theme.GalleryTextMuted
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+-import androidx.lifecycle.LifecycleEventObserver
+-import androidx.lifecycle.Lifecycle
+-import androidx.lifecycle.LifecycleOwner
+-import androidx.compose.runtime.mutableIntStateOf
+-import androidx.compose.animation.core.animateFloat
+-import androidx.compose.animation.core.rememberInfiniteTransition
+-import androidx.compose.animation.core.infiniteRepeatable
+-import androidx.compose.animation.core.tween
+-import androidx.compose.animation.core.LinearEasing
+-import androidx.compose.animation.core.RepeatMode
+-import androidx.compose.foundation.Canvas
+-import androidx.compose.ui.graphics.Path
+-import androidx.compose.ui.graphics.StrokeCap
+-import androidx.compose.ui.geometry.Offset
+-import androidx.compose.ui.geometry.Size
+-import androidx.compose.ui.graphics.drawscope.Stroke
+-import androidx.compose.ui.graphics.drawscope.withTransform
++
++enum class GalleryDestination {
++    VIDEOS,
++    PHOTOS,
++    LIBRARY
++}
+ 
+ @Composable
+ fun MainScreen(
+     repository: MediaRepository,
+     selectedTab: Int,
+     onSelectedTabChange: (Int) -> Unit,
+     onNavigateToFolder: (String) -> Unit,
+     onNavigateToVideo: (Long, String) -> Unit,
+     onNavigateToPhoto: (Long, String) -> Unit,
+     onNavigateToSettings: () -> Unit,
+     onMediaItemsLoaded: (List<MediaItem>) -> Unit = {}
+ ) {
+     val context = LocalContext.current
+     val scope = rememberCoroutineScope()
+-    var hasPermission by remember { mutableStateOf(false) }
+-    var isStartupLoading by remember { mutableStateOf(!repository.hasFreshMediaCache()) }
+-    var isLoading by remember { mutableStateOf(false) }
+-    var mediaItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+-    var folders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
+-
+-    var sortMode by remember { mutableStateOf(SortMode.BY_TIME) }
+-    var watchedLast by remember { mutableStateOf(repository.isWatchedLastEnabled()) }
+-
+-    // 网格/列表模式（文件夹、视频 Tab 独立保存）
+-    var folderGridMode by remember { mutableStateOf(repository.isMainFolderGridModeEnabled()) }
+-    var videoLayoutMode by remember { mutableStateOf(repository.getVideoLayoutMode()) }
+-    var videoGalleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
+-    // 视频网格尺寸档位: 140=小, 220=中, 320=大
+-    var videoGridSizeDp by remember { mutableIntStateOf(repository.getVideoGridSize()) }
+-    // 首次启动显示主界面功能教程
+-    var showMainTutorial by remember { mutableStateOf(!repository.isMainTutorialShown()) }
+-    var didInitialLoad by remember { mutableStateOf(false) }
+-
+-    // ── 增加生命周期监听与返回刷新 ──
+-    val lifecycleOwner = LocalContext.current as? LifecycleOwner
+-    var resumeTrigger by remember { mutableIntStateOf(0) }
+-    DisposableEffect(lifecycleOwner) {
+-        if (lifecycleOwner == null) {
+-            onDispose { }
+-        } else {
+-            val observer = LifecycleEventObserver { _, event ->
+-                if (event == Lifecycle.Event.ON_RESUME) {
+-                    resumeTrigger++
+-                }
+-            }
+-            lifecycleOwner.lifecycle.addObserver(observer)
+-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+-        }
+-    }
+-
+-    val requiredPermissions = remember {
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+-            arrayOf(
+-                Manifest.permission.READ_MEDIA_VIDEO,
+-                Manifest.permission.READ_MEDIA_IMAGES
+-            )
+-        } else {
+-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+-        }
+-    }
+-
+-    suspend fun reload(forceRefresh: Boolean = false) {
+-        val showBlockingLoading = forceRefresh || (!didInitialLoad && !repository.hasFreshMediaCache())
+-        if (showBlockingLoading) isLoading = true
+-        try {
+-            val items = repository.scanMedia(forceRefresh)
+-            mediaItems = items
+-            onMediaItemsLoaded(items)
+-            didInitialLoad = true
+-        } finally {
+-            if (showBlockingLoading) isLoading = false
+-        }
+-    }
+-
+-    // 动态刷新 Folders
+-    LaunchedEffect(mediaItems, resumeTrigger) {
+-        if (hasPermission && mediaItems.isNotEmpty()) {
+-            folders = repository.getFolders(mediaItems)
+-        }
+-    }
+-
+-    fun hasAllPermissions() = requiredPermissions.all {
+-        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
++    val store = remember(repository, scope) { MediaLibraryStore(repository, scope) }
++    val libraryState by store.state.collectAsState()
++    var hasVideoPermission by remember { mutableStateOf(hasVideoPermission(context)) }
++    var hasPhotoPermission by remember { mutableStateOf(hasPhotoPermission(context)) }
++
++    val videoPermissionLauncher = rememberLauncherForActivityResult(
++        ActivityResultContracts.RequestPermission()
++    ) { granted ->
++        hasVideoPermission = granted
++        if (granted) scope.launch { store.refresh(force = false) }
+     }
+-
+-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+-        hasPermission = results.values.all { it }
+-        if (hasPermission) {
+-            scope.launch {
+-                val showStartupAnimation = !repository.hasFreshMediaCache()
+-                isStartupLoading = showStartupAnimation
+-                val delayJob = if (showStartupAnimation) launch { delay(1200) } else null
+-                reload()
+-                delayJob?.join()
+-                isStartupLoading = false
+-            }
+-        } else {
+-            isStartupLoading = false
+-        }
++    val photoPermissionLauncher = rememberLauncherForActivityResult(
++        ActivityResultContracts.RequestPermission()
++    ) { granted ->
++        hasPhotoPermission = granted
++        if (granted) scope.launch { store.refresh(force = true) }
+     }
+ 
+     LaunchedEffect(Unit) {
+-        hasPermission = hasAllPermissions()
+-        if (hasPermission) {
+-            scope.launch {
+-                val showStartupAnimation = !repository.hasFreshMediaCache()
+-                isStartupLoading = showStartupAnimation
+-                val delayJob = if (showStartupAnimation) launch { delay(1200) } else null
+-                reload()
+-                delayJob?.join()
+-                isStartupLoading = false
+-            }
++        if (hasVideoPermission) {
++            store.refresh(force = false)
+         } else {
+-            isStartupLoading = false
+-            permissionLauncher.launch(requiredPermissions)
++            videoPermissionLauncher.launch(videoPermission())
+         }
+     }
+ 
+-    fun toggleFavorite(item: MediaItem) {
+-        repository.setFavorite(item, !repository.isFavorite(item))
+-        scope.launch { folders = repository.getFolders(mediaItems) }
+-    }
+-
+-    fun togglePlaylist(item: MediaItem) {
+-        repository.setInPlaylist(item, !repository.isInPlaylist(item))
+-        scope.launch { folders = repository.getFolders(mediaItems) }
++    val videos = remember(libraryState.generation, libraryState.videos) {
++        libraryState.videos.map { it.toMediaItem(MediaType.VIDEO) }
+     }
+-
+-    // ── Offload filtering and sorting to background thread ──
+-    var filteredFolders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
+-    var filteredVideos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+-    var filteredPhotos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+-    var filteredFavorites by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+-
+-    LaunchedEffect(folders) {
+-        filteredFolders = folders
++    val photos = remember(libraryState.generation, libraryState.photos) {
++        libraryState.photos.map { it.toMediaItem(MediaType.PHOTO) }
+     }
+-
+-    LaunchedEffect(mediaItems, sortMode, watchedLast, resumeTrigger) {
+-        val result = withContext(Dispatchers.Default) {
+-            val watchedSet = if (watchedLast) repository.watchedKeySnapshot() else emptySet()
+-            FilteredMedia(
+-                videos = sortMedia(mediaItems.filter { it.type == MediaType.VIDEO }, sortMode, watchedLast, watchedSet),
+-                photos = sortMedia(mediaItems.filter { it.type == MediaType.PHOTO }, sortMode, watchedLast, watchedSet),
+-                favorites = sortMedia(repository.favoriteItems(mediaItems), sortMode, watchedLast, watchedSet)
+-            )
++    var playbackProgress by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
++    LaunchedEffect(videos) {
++        playbackProgress = withContext(Dispatchers.IO) {
++            repository.playbackProgressSnapshot(videos)
+         }
+-        filteredVideos = result.videos
+-        filteredPhotos = result.photos
+-        filteredFavorites = result.favorites
+     }
+-
+-    val progressItems = remember(selectedTab, filteredVideos, filteredFavorites) {
+-        when (selectedTab) {
+-            1 -> filteredVideos
+-            3 -> filteredFavorites
+-            else -> emptyList()
+-        }
++    LaunchedEffect(videos, photos) {
++        onMediaItemsLoaded(videos + photos)
+     }
+-    var progressSnapshot by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
+-    LaunchedEffect(progressItems, resumeTrigger) {
+-        // 防抖 500ms：快速切 Tab 时只在稳定后才触发 IO 读
+-        delay(500)
+-        withContext(Dispatchers.IO) {
+-            progressSnapshot = repository.playbackProgressSnapshot(progressItems)
++
++    val columnStore = remember(repository) {
++        object : GalleryColumnStore {
++            override fun read(): Int = repository.getGalleryColumnCount()
++            override fun write(columnCount: Int) = repository.setGalleryColumnCount(columnCount)
+         }
+     }
+-    val favoriteKeys = remember(folders, mediaItems, resumeTrigger) { repository.favoriteKeySnapshot() }
+-    val playlistKeys = remember(folders, mediaItems, resumeTrigger) { repository.playlistKeySnapshot() }
++    var columnCount by remember { mutableIntStateOf(columnStore.readClampedColumnCount()) }
+ 
+-    Scaffold(
+-        containerColor = CarbonBg
+-    ) { paddingValues ->
+-        AppBackground(
+-            modifier = Modifier
+-                .fillMaxSize()
+-                .padding(paddingValues)
+-        ) {
+-            Column(
+-                modifier = Modifier
+-                    .fillMaxSize()
+-                    .padding(horizontal = 16.dp)
+-            ) {
+-                Header(
+-                    onRefresh = { if (hasPermission) scope.launch { reload(forceRefresh = true) } },
+-                    onSettings = onNavigateToSettings
+-                )
+-                SortToolbar(
+-                    sortMode = sortMode,
+-                    onSortModeChange = { sortMode = it },
+-                    watchedLast = watchedLast,
+-                    onWatchedLastChange = {
+-                        watchedLast = it
+-                        repository.setWatchedLastEnabled(it)
+-                    },
+-                    // 仅文件夹/视频 Tab 显示网格切换按钮
+-                    showLayoutToggle = selectedTab == 0 || selectedTab == 1,
+-                    currentLayoutMode = when (selectedTab) {
+-                        0 -> if (folderGridMode) LayoutMode.GRID else LayoutMode.LIST
+-                        1 -> videoLayoutMode
+-                        else -> LayoutMode.LIST
+-                    },
+-                    showSizeToggle = when (selectedTab) {
+-                        1 -> videoLayoutMode == LayoutMode.GRID
+-                        else -> false
+-                    },
+-                    currentGridSizeDp = videoGridSizeDp,
+-                    onGridSizeChange = { size ->
+-                        videoGridSizeDp = size
+-                        repository.setVideoGridSize(size)
+-                    },
+-                    onLayoutModeToggle = {
+-                        when (selectedTab) {
+-                            0 -> {
+-                                folderGridMode = !folderGridMode
+-                                repository.setMainFolderGridModeEnabled(folderGridMode)
+-                            }
+-                            1 -> {
+-                                videoLayoutMode = when (videoLayoutMode) {
+-                                    LayoutMode.LIST -> LayoutMode.GRID
+-                                    LayoutMode.GRID -> LayoutMode.GALLERY
+-                                    LayoutMode.GALLERY -> LayoutMode.LIST
+-                                }
+-                                repository.setVideoLayoutMode(videoLayoutMode)
+-                            }
+-                        }
+-                    }
+-                )
+-                Spacer(modifier = Modifier.height(12.dp))
++    if (!hasVideoPermission) {
++        PermissionScreen(
++            title = "允许访问视频",
++            message = "需要读取本机视频，才能建立时间画廊。",
++            onGrant = { videoPermissionLauncher.launch(videoPermission()) }
++        )
++        return
++    }
+ 
+-                when {
+-                    !hasPermission -> PermissionView { permissionLauncher.launch(requiredPermissions) }
+-                    isStartupLoading || isLoading -> Box(
+-                        modifier = Modifier.fillMaxSize().background(CarbonBg),
+-                    ) {
+-                        BlackCatLoader(
+-                            labelText = if (isStartupLoading) "正在启动黑猫播放器..." else "正在刷新媒体库..."
+-                        )
+-                    }
+-                    else -> Box(Modifier.weight(1f)) {
+-                        when (selectedTab) {
+-                            0 -> if (folderGridMode) {
+-                                FolderGridView(filteredFolders, onNavigateToFolder)
+-                            } else {
+-                                FolderList(filteredFolders, onNavigateToFolder)
+-                            }
+-                            1 -> when (videoLayoutMode) {
+-                                LayoutMode.LIST -> {
+-                                    MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
+-                                }
+-                                LayoutMode.GRID -> {
+-                                    MediaGridView(
+-                                        items = filteredVideos,
+-                                        folderName = MediaRepository.ALL_VIDEOS,
+-                                        progressSnapshot = progressSnapshot,
+-                                        repository = repository,
+-                                        gridSizeDp = videoGridSizeDp,
+-                                        onNavigateToVideo = onNavigateToVideo,
+-                                        onNavigateToPhoto = onNavigateToPhoto
+-                                    )
+-                                }
+-                                LayoutMode.GALLERY -> {
+-                                    MediaGalleryView(
+-                                        items = filteredVideos,
+-                                        folderName = MediaRepository.ALL_VIDEOS,
+-                                        progressSnapshot = progressSnapshot,
+-                                        columnsCount = videoGalleryColumns,
+-                                        onColumnsChange = { cols ->
+-                                            videoGalleryColumns = cols
+-                                            repository.setGalleryColumnCount(cols)
+-                                        },
+-                                        onNavigateToVideo = onNavigateToVideo,
+-                                        onNavigateToPhoto = onNavigateToPhoto
+-                                    )
+-                                }
+-                            }
+-                            2 -> PhotoGrid(filteredPhotos, onNavigateToPhoto)
+-                            3 -> MediaList(filteredFavorites, MediaRepository.FAVORITES, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
+-                        }
+-                    }
+-                }
++    MainGalleryContent(
++        videos = videos,
++        photos = photos,
++        playbackProgress = playbackProgress,
++        initialColumns = columnCount,
++        onColumnsChange = { requested ->
++            columnCount = requested.coerceIn(2, 8)
++            columnStore.write(columnCount)
++        },
++        onNavigateToVideo = onNavigateToVideo,
++        onNavigateToPhoto = onNavigateToPhoto,
++        onNavigateToLibrary = {},
++        onRefresh = { scope.launch { store.refresh(force = true) } },
++        initialDestination = GalleryDestination.entries.getOrElse(selectedTab) {
++            GalleryDestination.VIDEOS
++        },
++        onDestinationChange = { destination ->
++            onSelectedTabChange(destination.ordinal)
++            if (destination == GalleryDestination.PHOTOS && !hasPhotoPermission) {
++                photoPermissionLauncher.launch(photoPermission())
+             }
++        },
++        onOpenLibrarySection = onNavigateToFolder,
++        onOpenSettings = onNavigateToSettings,
++        isRefreshing = libraryState.isRefreshing
++    )
++}
+ 
+-            GlassmorphicBottomNavBar(
+-                selectedTab = selectedTab,
+-                onTabSelected = onSelectedTabChange,
+-                modifier = Modifier.align(Alignment.BottomCenter)
+-            )
++@Composable
++fun MainGalleryContent(
++    videos: List<MediaItem>,
++    photos: List<MediaItem>,
++    playbackProgress: Map<String, Float>,
++    initialColumns: Int,
++    onColumnsChange: (Int) -> Unit,
++    onNavigateToVideo: (Long, String) -> Unit,
++    onNavigateToPhoto: (Long, String) -> Unit,
++    onNavigateToLibrary: () -> Unit,
++    onRefresh: () -> Unit,
++    modifier: Modifier = Modifier,
++    initialDestination: GalleryDestination = GalleryDestination.VIDEOS,
++    onDestinationChange: (GalleryDestination) -> Unit = {},
++    onOpenLibrarySection: (String) -> Unit = {},
++    onOpenSettings: () -> Unit = {},
++    isRefreshing: Boolean = false
++) {
++    var destination by rememberSaveable { mutableStateOf(initialDestination) }
+ 
+-            // 首次启动主界面功能教程
+-            com.example.videoplayer.ui.components.MainTutorialOverlay(
+-                visible = showMainTutorial,
+-                onDismiss = {
+-                    showMainTutorial = false
+-                    repository.setMainTutorialShown(true)
++    Scaffold(
++        containerColor = GalleryBackground,
++        topBar = {
++            GalleryTopBar(
++                destination = destination,
++                isRefreshing = isRefreshing,
++                onRefresh = onRefresh
++            )
++        },
++        bottomBar = {
++            GalleryNavigationBar(
++                destination = destination,
++                onSelect = { selected ->
++                    destination = selected
++                    onDestinationChange(selected)
++                    if (selected == GalleryDestination.LIBRARY) onNavigateToLibrary()
+                 }
+             )
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
+-    Row(
+-        modifier = Modifier
+-            .fillMaxWidth()
+-            .padding(top = 22.dp, bottom = 12.dp),
+-        horizontalArrangement = Arrangement.SpaceBetween,
+-        verticalAlignment = Alignment.CenterVertically
+-    ) {
+-        Column {
+-            val titleGradient = Brush.linearGradient(
+-                colors = listOf(PrimaryNeonPurple, SecondaryNeonCyan)
++        },
++        modifier = modifier.fillMaxSize()
++    ) { padding ->
++        when (destination) {
++            GalleryDestination.VIDEOS -> VideoGalleryScreen(
++                videos = videos,
++                playbackProgress = playbackProgress,
++                columnCount = initialColumns,
++                onColumnsChange = onColumnsChange,
++                onNavigateToVideo = onNavigateToVideo,
++                modifier = Modifier.padding(padding)
+             )
+-            Text(
+-                text = "黑猫播放器",
+-                style = TextStyle(
+-                    brush = titleGradient,
+-                    fontSize = 24.sp,
+-                    fontWeight = FontWeight.Bold
+-                )
++            GalleryDestination.PHOTOS -> PhotoGalleryScreen(
++                photos = photos,
++                onNavigateToPhoto = onNavigateToPhoto,
++                modifier = Modifier.padding(padding)
++            )
++            GalleryDestination.LIBRARY -> LibraryDestinationScreen(
++                onOpenSection = onOpenLibrarySection,
++                onOpenSettings = onOpenSettings,
++                modifier = Modifier.padding(padding)
+             )
+-            Text("4K 本地多媒体播放器", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+-        }
+-        Row {
+-            Box(
+-                modifier = Modifier
+-                    .size(40.dp)
+-                    .clip(CircleShape)
+-                    .background(Color.White.copy(alpha = 0.08f))
+-                    .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+-                    .bounceClick { onRefresh() },
+-                contentAlignment = Alignment.Center
+-            ) {
+-                Icon(
+-                    imageVector = Icons.Default.Refresh,
+-                    contentDescription = "Refresh",
+-                    tint = SecondaryNeonCyan,
+-                    modifier = Modifier.size(20.dp)
+-                )
+-            }
+-            Spacer(Modifier.width(8.dp))
+-            Box(
+-                modifier = Modifier
+-                    .size(40.dp)
+-                    .clip(CircleShape)
+-                    .background(Color.White.copy(alpha = 0.08f))
+-                    .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
+-                    .bounceClick { onSettings() },
+-                contentAlignment = Alignment.Center
+-            ) {
+-                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(20.dp))
+-            }
+         }
+     }
+ }
+ 
+ @Composable
+-private fun SortToolbar(
+-    sortMode: SortMode,
+-    onSortModeChange: (SortMode) -> Unit,
+-    watchedLast: Boolean,
+-    onWatchedLastChange: (Boolean) -> Unit,
+-    showLayoutToggle: Boolean = false,
+-    currentLayoutMode: LayoutMode = LayoutMode.LIST,
+-    onLayoutModeToggle: () -> Unit = {},
+-    showSizeToggle: Boolean = false,
+-    currentGridSizeDp: Int = 220,
+-    onGridSizeChange: (Int) -> Unit = {}
++private fun GalleryTopBar(
++    destination: GalleryDestination,
++    isRefreshing: Boolean,
++    onRefresh: () -> Unit
+ ) {
+-    var expanded by remember { mutableStateOf(false) }
+     Row(
++        verticalAlignment = Alignment.CenterVertically,
++        horizontalArrangement = Arrangement.SpaceBetween,
+         modifier = Modifier
+             .fillMaxWidth()
+-            .padding(top = 8.dp),
+-        horizontalArrangement = Arrangement.SpaceBetween,
+-        verticalAlignment = Alignment.CenterVertically
++            .background(GalleryBackground.copy(alpha = 0.96f))
++            .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 8.dp)
+     ) {
+-        Box {
+-            Box(
+-                modifier = Modifier
+-                    .clip(RoundedCornerShape(10.dp))
+-                    .background(Color.White.copy(alpha = 0.05f))
+-                    .border(0.5.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(10.dp))
+-                    .bounceClick { expanded = true }
+-                    .padding(horizontal = 12.dp, vertical = 6.dp)
+-            ) {
+-                Row(verticalAlignment = Alignment.CenterVertically) {
+-                    Icon(
+-                        Icons.AutoMirrored.Filled.Sort, 
+-                        contentDescription = null, 
+-                        tint = Color.White, 
+-                        modifier = Modifier.size(16.dp)
+-                    )
+-                    Spacer(Modifier.width(6.dp))
+-                    Text(sortMode.label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+-                }
+-            }
+-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+-                SortMode.entries.forEach { mode ->
+-                    DropdownMenuItem(
+-                        text = { Text(mode.label) },
+-                        onClick = {
+-                            onSortModeChange(mode)
+-                            expanded = false
+-                        }
+-                    )
+-                }
+-            }
+-        }
+-        Row(verticalAlignment = Alignment.CenterVertically) {
+-            if (showLayoutToggle) {
+-                if (showSizeToggle) {
+-                    val sizes = listOf(140 to "S", 220 to "M", 320 to "L")
+-                    sizes.forEach { (size, label) ->
+-                        val isActive = currentGridSizeDp == size
+-                        Box(
+-                            modifier = Modifier
+-                                .padding(end = 3.dp)
+-                                .size(26.dp)
+-                                .background(
+-                                    if (isActive) SecondaryNeonCyan.copy(alpha = 0.22f) else Color.Transparent,
+-                                    RoundedCornerShape(5.dp)
+-                                )
+-                                .border(
+-                                    0.5.dp,
+-                                    if (isActive) SecondaryNeonCyan else Color.White.copy(alpha = 0.3f),
+-                                    RoundedCornerShape(5.dp)
+-                                )
+-                                .bounceClick { onGridSizeChange(size) },
+-                            contentAlignment = Alignment.Center
+-                        ) {
+-                            Text(
+-                                text = label,
+-                                color = if (isActive) SecondaryNeonCyan else TextSecondary,
+-                                fontSize = 10.sp,
+-                                fontWeight = FontWeight.Bold
+-                            )
+-                        }
+-                    }
+-                    Spacer(Modifier.width(4.dp))
+-                }
+-                val isNotList = currentLayoutMode != LayoutMode.LIST
+-                Box(
+-                    modifier = Modifier
+-                        .size(36.dp)
+-                        .clip(RoundedCornerShape(8.dp))
+-                        .background(if (isNotList) SecondaryNeonCyan.copy(alpha = 0.22f) else Color.Transparent)
+-                        .bounceClick { onLayoutModeToggle() },
+-                    contentAlignment = Alignment.Center
+-                ) {
+-                    Icon(
+-                        imageVector = when (currentLayoutMode) {
+-                            LayoutMode.LIST -> Icons.Default.GridView
+-                            LayoutMode.GRID -> Icons.Default.Collections
+-                            LayoutMode.GALLERY -> Icons.AutoMirrored.Filled.ViewList
+-                        },
+-                        contentDescription = "切换布局模式",
+-                        tint = if (isNotList) SecondaryNeonCyan else TextSecondary,
+-                        modifier = Modifier.size(20.dp)
+-                    )
+-                }
+-                Spacer(Modifier.width(6.dp))
++        Column {
++            Text(
++                text = when (destination) {
++                    GalleryDestination.VIDEOS -> "视频"
++                    GalleryDestination.PHOTOS -> "图片"
++                    GalleryDestination.LIBRARY -> "资料库"
++                },
++                color = GalleryText,
++                style = MaterialTheme.typography.headlineMedium
++            )
++            if (destination == GalleryDestination.VIDEOS) {
++                Text("按时间浏览本机视频", color = GalleryTextMuted, fontSize = 11.sp)
+             }
+-            Text("Watched Last", color = TextSecondary, fontSize = 12.sp)
+-            Spacer(Modifier.width(6.dp))
+-            Switch(checked = watchedLast, onCheckedChange = onWatchedLastChange)
+         }
+-    }
+-}
+-
+-@Composable
+-private fun FolderList(folders: List<MediaFolder>, onNavigateToFolder: (String) -> Unit) {
+-    if (folders.isEmpty()) {
+-        EmptyStateView("No folders found")
+-    } else {
+-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 96.dp)) {
+-            items(
+-                folders,
+-                key = { "${it.name}-${it.path}" },
+-                contentType = { "folder" }
+-            ) { folder -> FolderCard(folder = folder, onClick = { onNavigateToFolder(folder.name) }) }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun FolderGridView(folders: List<MediaFolder>, onNavigateToFolder: (String) -> Unit) {
+-    if (folders.isEmpty()) {
+-        EmptyStateView("No folders found")
+-    } else {
+-        LazyVerticalGrid(
+-            columns = GridCells.Adaptive(148.dp),
+-            verticalArrangement = Arrangement.spacedBy(16.dp),
+-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp)
+-        ) {
+-            gridItems(
+-                folders,
+-                key = { "${it.name}-${it.path}" },
+-                contentType = { "folder" }
+-            ) { folder ->
+-                FolderGridTile(folder = folder, onClick = { onNavigateToFolder(folder.name) })
+-            }
++        IconButton(onClick = onRefresh, enabled = !isRefreshing) {
++            Icon(
++                imageVector = Icons.Default.Refresh,
++                contentDescription = if (isRefreshing) "正在刷新" else "刷新",
++                tint = if (isRefreshing) GalleryTextMuted else GalleryText
++            )
+         }
+     }
+ }
+ 
+ @Composable
+-private fun MediaList(
+-    items: List<MediaItem>,
+-    folderName: String,
+-    favoriteKeys: Set<String>,
+-    playlistKeys: Set<String>,
+-    progressSnapshot: Map<String, Float>,
+-    repository: MediaRepository,
+-    onFavorite: (MediaItem) -> Unit,
+-    onPlaylist: (MediaItem) -> Unit,
+-    onNavigateToVideo: (Long, String) -> Unit,
+-    onNavigateToPhoto: (Long, String) -> Unit
++private fun GalleryNavigationBar(
++    destination: GalleryDestination,
++    onSelect: (GalleryDestination) -> Unit
+ ) {
+-    if (items.isEmpty()) {
+-        EmptyStateView("No media items found")
+-    } else {
+-        val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
+-        val listState = rememberLazyListState()
+-        val thumbnailScrollController = remember {
+-            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
+-        }
+-        LaunchedEffect(listState.isScrollInProgress) {
+-            thumbnailScrollController.onScrollInProgressChanged(listState.isScrollInProgress)
+-        }
+-        LazyColumn(
+-            state = listState,
+-            verticalArrangement = Arrangement.spacedBy(10.dp),
+-            contentPadding = PaddingValues(bottom = 96.dp)
+-        ) {
+-            items(
+-                items,
+-                key = { it.storageKey },
+-                contentType = { it.type }
+-            ) { item ->
+-                MediaItemCard(
+-                    item = item,
+-                    isFavorite = item.storageKey in favoriteKeys,
+-                    isInPlaylist = item.storageKey in playlistKeys,
+-                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+-                    isLastViewed = lastViewedKey == item.storageKey,
+-                    onFavoriteClick = { onFavorite(item) },
+-                    onPlaylistClick = { onPlaylist(item) },
+-                    onClick = {
+-                        when (item.type) {
+-                            MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
+-                            MediaType.AUDIO -> Unit
+-                            MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+-                        }
+-                    }
+-                )
+-            }
+-        }
++    NavigationBar(containerColor = GallerySurface.copy(alpha = 0.98f)) {
++        DestinationItem(
++            destination = GalleryDestination.VIDEOS,
++            current = destination,
++            icon = Icons.Default.PlayCircleOutline,
++            label = "视频",
++            tag = "destination-videos",
++            onSelect = onSelect
++        )
++        DestinationItem(
++            destination = GalleryDestination.PHOTOS,
++            current = destination,
++            icon = Icons.Default.Image,
++            label = "图片",
++            tag = "destination-photos",
++            onSelect = onSelect
++        )
++        DestinationItem(
++            destination = GalleryDestination.LIBRARY,
++            current = destination,
++            icon = Icons.Default.Collections,
++            label = "资料库",
++            tag = "destination-library",
++            onSelect = onSelect
++        )
+     }
+ }
+ 
+ @Composable
+-private fun MediaGridView(
+-    items: List<MediaItem>,
+-    folderName: String,
+-    progressSnapshot: Map<String, Float>,
+-    repository: MediaRepository,
+-    gridSizeDp: Int = 220,
+-    onNavigateToVideo: (Long, String) -> Unit,
+-    onNavigateToPhoto: (Long, String) -> Unit
++private fun RowScope.DestinationItem(
++    destination: GalleryDestination,
++    current: GalleryDestination,
++    icon: ImageVector,
++    label: String,
++    tag: String,
++    onSelect: (GalleryDestination) -> Unit
+ ) {
+-    if (items.isEmpty()) {
+-        EmptyStateView("No media items found")
+-    } else {
+-        val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
+-        val gridState = rememberLazyGridState()
+-        val thumbnailScrollController = remember {
+-            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
+-        }
+-        LaunchedEffect(gridState.isScrollInProgress) {
+-            thumbnailScrollController.onScrollInProgressChanged(gridState.isScrollInProgress)
+-        }
+-        LazyVerticalGrid(
+-            state = gridState,
+-            columns = GridCells.Adaptive(gridSizeDp.dp),
+-            verticalArrangement = Arrangement.spacedBy(16.dp),
+-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp)
+-        ) {
+-            gridItems(
+-                items,
+-                key = { it.storageKey },
+-                contentType = { it.type }
+-            ) { item ->
+-                MediaGridTile(
+-                    item = item,
+-                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+-                    isLastViewed = lastViewedKey == item.storageKey,
+-                    onClick = {
+-                        when (item.type) {
+-                            MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
+-                            MediaType.AUDIO -> Unit
+-                            MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+-                        }
+-                    }
+-                )
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun PhotoGrid(items: List<MediaItem>, onNavigateToPhoto: (Long, String) -> Unit) {
+-    if (items.isEmpty()) {
+-        EmptyStateView("No photos found")
+-    } else {
+-        LazyVerticalGrid(
+-            columns = GridCells.Adaptive(112.dp),
+-            verticalArrangement = Arrangement.spacedBy(8.dp),
+-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp)
+-        ) {
+-            gridItems(
+-                items,
+-                key = { it.storageKey },
+-                contentType = { it.type }
+-            ) { item ->
+-                Box(
+-                    modifier = Modifier
+-                        .aspectRatio(1f)
+-                        .clip(RoundedCornerShape(10.dp))
+-                        .background(Color(0xFF13151D))
+-                        .clickable { onNavigateToPhoto(item.id, MediaRepository.ALL_PHOTOS) }
+-                ) {
+-                    AsyncImage(
+-                        model = mediaPreviewRequest(item),
+-                        contentDescription = item.title,
+-                        modifier = Modifier.fillMaxSize(),
+-                        contentScale = ContentScale.Crop
+-                    )
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-private fun PermissionView(onGrantClick: () -> Unit) {
+-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+-            Icon(Icons.Default.Lock, contentDescription = null, tint = PrimaryNeonPurple, modifier = Modifier.size(64.dp))
+-            Spacer(Modifier.height(14.dp))
+-            Text("Media Permission Required", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+-            Spacer(Modifier.height(8.dp))
+-            Text("The app needs media access to scan your local videos and images.", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
+-            Spacer(Modifier.height(22.dp))
+-            Button(onClick = onGrantClick, colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeonPurple), shape = RoundedCornerShape(10.dp)) {
+-                Text("Grant Permission", color = Color.White, fontWeight = FontWeight.Bold)
+-            }
+-        }
+-    }
+-}
+-
+-@Composable
+-fun EmptyStateView(message: String) {
+-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+-            Icon(Icons.Default.Info, contentDescription = null, tint = TextMuted, modifier = Modifier.size(44.dp))
+-            Spacer(Modifier.height(8.dp))
+-            Text(message, color = TextSecondary, fontSize = 14.sp)
+-        }
+-    }
++    NavigationBarItem(
++        selected = destination == current,
++        onClick = { onSelect(destination) },
++        icon = { Icon(icon, contentDescription = label) },
++        label = { Text(label) },
++        colors = NavigationBarItemDefaults.colors(
++            selectedIconColor = GalleryBackground,
++            selectedTextColor = GalleryIceBlue,
++            indicatorColor = GalleryIceBlue,
++            unselectedIconColor = GalleryTextMuted,
++            unselectedTextColor = GalleryTextMuted
++        ),
++        modifier = Modifier.testTag(tag)
++    )
+ }
+ 
+ @Composable
+-fun GlassmorphicBottomNavBar(
+-    selectedTab: Int, 
+-    onTabSelected: (Int) -> Unit,
++private fun LibraryDestinationScreen(
++    onOpenSection: (String) -> Unit,
++    onOpenSettings: () -> Unit,
+     modifier: Modifier = Modifier
+ ) {
+-    Box(
++    val entries = listOf(
++        LibraryEntry("文件夹", Icons.Default.Folder, MediaRepository.ALL_VIDEOS),
++        LibraryEntry("收藏", Icons.Default.FavoriteBorder, MediaRepository.FAVORITES),
++        LibraryEntry("播放历史", Icons.Default.History, MediaRepository.RECENT_PLAYED),
++        LibraryEntry("播放列表", Icons.Default.PlaylistPlay, MediaRepository.PLAYLIST)
++    )
++    Column(
++        verticalArrangement = Arrangement.spacedBy(8.dp),
+         modifier = modifier
+-            .padding(horizontal = 20.dp, vertical = 16.dp)
+-            .fillMaxWidth()
+-            .height(66.dp)
+-            .shadow(
+-                elevation = 12.dp,
+-                shape = RoundedCornerShape(22.dp),
+-                clip = false,
+-                ambientColor = Color.Black,
+-                spotColor = Color.Black
+-            )
+-            .clip(RoundedCornerShape(22.dp))
+-            .background(
+-                brush = Brush.verticalGradient(
+-                    colors = listOf(
+-                        Color(0xE60D1117),
+-                        Color(0xCC070709)
+-                    )
+-                )
+-            )
+-            .border(
+-                width = 1.dp,
+-                brush = Brush.linearGradient(
+-                    colors = listOf(
+-                        CarbonBorder,
+-                        Color(0x1F06B6D4),
+-                        CarbonBorder.copy(alpha = 0.5f)
+-                    )
+-                ),
+-                shape = RoundedCornerShape(22.dp)
+-            ),
+-        contentAlignment = Alignment.Center
++            .fillMaxSize()
++            .background(GalleryBackground)
++            .padding(14.dp)
++            .testTag("library-destination")
+     ) {
+-        Row(
+-            modifier = Modifier
+-                .fillMaxSize()
+-                .padding(horizontal = 10.dp),
+-            horizontalArrangement = Arrangement.SpaceAround,
+-            verticalAlignment = Alignment.CenterVertically
+-        ) {
+-            NavBarItem(Icons.Default.Folder, "文件夹", selectedTab == 0) { onTabSelected(0) }
+-            NavBarItem(Icons.Default.PlayCircle, "视频", selectedTab == 1) { onTabSelected(1) }
+-            NavBarItem(Icons.Default.Image, "图片", selectedTab == 2) { onTabSelected(2) }
+-            NavBarItem(Icons.Default.Star, "收藏", selectedTab == 3) { onTabSelected(3) }
++        entries.forEach { entry ->
++            LibraryRow(entry.icon, entry.label) { onOpenSection(entry.folderName) }
+         }
++        LibraryRow(Icons.Default.Settings, "设置", onOpenSettings)
+     }
+ }
+ 
+ @Composable
+-fun NavBarItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: () -> Unit) {
+-    val selectionProgress by androidx.compose.animation.core.animateFloatAsState(
+-        targetValue = if (isSelected) 1f else 0f,
+-        animationSpec = tween(durationMillis = 220),
+-        label = "navSelection"
+-    )
+-    val tintColor = androidx.compose.ui.graphics.lerp(TextMuted, SecondaryNeonCyan, selectionProgress)
+-    
+-    Column(
+-        horizontalAlignment = Alignment.CenterHorizontally,
+-        verticalArrangement = Arrangement.Center,
+-        modifier = Modifier
+-            .clip(RoundedCornerShape(12.dp))
+-            .background(SecondaryNeonCyan.copy(alpha = 0.16f * selectionProgress))
+-            .graphicsLayer {
+-                scaleX = 1f + 0.04f * selectionProgress
+-                scaleY = 1f + 0.04f * selectionProgress
+-            }
+-            .bounceClick { onClick() }
+-            .padding(horizontal = 12.dp, vertical = 6.dp)
++private fun LibraryRow(icon: ImageVector, label: String, onClick: () -> Unit) {
++    androidx.compose.material3.Surface(
++        onClick = onClick,
++        color = GallerySurface,
++        shape = RoundedCornerShape(8.dp),
++        modifier = Modifier.fillMaxWidth()
+     ) {
+-        Icon(
+-            icon, 
+-            contentDescription = label, 
+-            tint = tintColor, 
+-            modifier = Modifier.size(21.dp)
+-        )
+-        Spacer(Modifier.height(2.dp))
+-        Text(
+-            label, 
+-            color = tintColor, 
+-            fontSize = 9.sp, 
+-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+-        )
+-    }
+-}
+-
+-private enum class SortMode(val label: String) {
+-    BY_TIME("Time"),
+-    BY_NAME("Name"),
+-    BY_SIZE("Size")
+-}
+-
+-private data class FilteredMedia(
+-    val videos: List<MediaItem>,
+-    val photos: List<MediaItem>,
+-    val favorites: List<MediaItem>
+-)
+-
+-private fun sortMedia(
+-    items: List<MediaItem>,
+-    sortMode: SortMode,
+-    watchedLast: Boolean,
+-    watchedSet: Set<String>
+-): List<MediaItem> {
+-    val sorted = when (sortMode) {
+-        SortMode.BY_TIME -> items.sortedByDescending { it.dateAdded }
+-        SortMode.BY_NAME -> items.sortedBy { it.displayName.lowercase() }
+-        SortMode.BY_SIZE -> items.sortedByDescending { it.size }
++        Row(
++            verticalAlignment = Alignment.CenterVertically,
++            modifier = Modifier.padding(horizontal = 14.dp, vertical = 15.dp)
++        ) {
++            Icon(icon, contentDescription = null, tint = GalleryIceBlue)
++            Spacer(Modifier.width(12.dp))
++            Text(label, color = GalleryText, fontWeight = FontWeight.Medium)
++        }
+     }
+-    // 使用预计算的 watchedSet 快照，避免每个 item 读 SharedPreferences
+-    return if (watchedLast) sorted.sortedBy { it.storageKey in watchedSet } else sorted
+ }
+ 
+ @Composable
+-fun BlackCatLoader(
+-    modifier: Modifier = Modifier,
+-    labelText: String = "正在刷新媒体库..."
+-) {
+-    val infiniteTransition = rememberInfiniteTransition(label = "Spin")
+-    val angle by infiniteTransition.animateFloat(
+-        initialValue = 0f,
+-        targetValue = 360f,
+-        animationSpec = infiniteRepeatable(
+-            animation = tween(durationMillis = 1000, easing = LinearEasing),
+-            repeatMode = RepeatMode.Restart
+-        ),
+-        label = "RotationAngle"
+-    )
+-
+-    Column(
+-        modifier = modifier.fillMaxSize(),
+-        verticalArrangement = Arrangement.Center,
+-        horizontalAlignment = Alignment.CenterHorizontally
++private fun PermissionScreen(title: String, message: String, onGrant: () -> Unit) {
++    Box(
++        modifier = Modifier
++            .fillMaxSize()
++            .background(GalleryBackground),
++        contentAlignment = Alignment.Center
+     ) {
+-        Canvas(modifier = Modifier.size(64.dp)) {
+-            val width = size.width
+-            val height = size.height
+-            val strokeWidth = 5f * (width / 64f)
+-            
+-            // Draw a background track (faint purple)
+-            drawCircle(
+-                color = Color(0x1A8B5CF6),
+-                radius = (width - strokeWidth) / 2f,
+-                center = Offset(width / 2f, height / 2f),
+-                style = Stroke(width = strokeWidth)
++        Column(
++            horizontalAlignment = Alignment.CenterHorizontally,
++            modifier = Modifier.padding(32.dp)
++        ) {
++            Icon(
++                Icons.Default.PlayCircleOutline,
++                contentDescription = null,
++                tint = GalleryIceBlue,
++                modifier = Modifier.size(42.dp)
+             )
+-
+-            // Draw a rotating gradient arc representing the spinning loader
+-            withTransform({
+-                rotate(degrees = angle, pivot = Offset(width / 2f, height / 2f))
+-            }) {
+-                drawArc(
+-                    brush = Brush.sweepGradient(
+-                        colors = listOf(
+-                            Color(0x0000E5FF),
+-                            Color(0xFF00E5FF),
+-                            Color(0xFF8B5CF6),
+-                            Color(0x008B5CF6)
+-                        )
+-                    ),
+-                    startAngle = 0f,
+-                    sweepAngle = 270f,
+-                    useCenter = false,
+-                    size = Size(width - strokeWidth, height - strokeWidth),
+-                    topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f),
+-                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+-                )
+-            }
++            Spacer(Modifier.height(14.dp))
++            Text(title, color = GalleryText, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
++            Spacer(Modifier.height(6.dp))
++            Text(message, color = GalleryTextMuted, fontSize = 13.sp)
++            Spacer(Modifier.height(18.dp))
++            Button(onClick = onGrant) { Text("继续") }
+         }
+-
+-        Spacer(Modifier.height(24.dp))
+-
+-        // Neon loading text
+-        val titleGradient = Brush.linearGradient(
+-            colors = listOf(PrimaryNeonPurple, SecondaryNeonCyan)
+-        )
+-        Text(
+-            text = labelText,
+-            style = TextStyle(
+-                brush = titleGradient,
+-                fontSize = 14.sp,
+-                fontWeight = FontWeight.Bold
+-            )
+-        )
+     }
+ }
+ 
+-@Composable
+-private fun AlienBlackCatIcon(
+-    eyeColor: Color,
+-    modifier: Modifier = Modifier
+-) {
+-    Canvas(modifier = modifier) {
+-        val width = size.width
+-        val height = size.height
+-
+-        val scaleX = width / 108f
+-        val scaleY = height / 108f
+-
+-        // Draw outer ring glow (shadow)
+-        drawCircle(
+-            color = eyeColor.copy(alpha = 0.22f),
+-            radius = 36f * scaleX,
+-            center = Offset(54f * scaleX, 54f * scaleY),
+-            style = Stroke(width = 8f * scaleX)
+-        )
++private data class LibraryEntry(
++    val label: String,
++    val icon: ImageVector,
++    val folderName: String
++)
+ 
+-        // Draw outer ring main line
+-        drawCircle(
+-            color = eyeColor,
+-            radius = 36f * scaleX,
+-            center = Offset(54f * scaleX, 54f * scaleY),
+-            style = Stroke(width = 4f * scaleX)
+-        )
++private fun LibraryMedia.toMediaItem(type: MediaType): MediaItem = MediaItem(
++    id = mediaStoreId,
++    uri = Uri.parse(uri),
++    title = title,
++    displayName = displayName,
++    path = path,
++    folderName = folderName,
++    size = size,
++    dateAdded = dateAdded,
++    dateModified = dateModified,
++    duration = duration,
++    resolution = resolution,
++    type = type
++)
+ 
+-        // Draw central play triangle
+-        val playPath = Path().apply {
+-            moveTo(46f * scaleX, 36f * scaleY)
+-            lineTo(72f * scaleX, 54f * scaleY)
+-            lineTo(46f * scaleX, 72f * scaleY)
+-            close()
+-        }
+-        drawPath(path = playPath, color = Color.White)
++private fun videoPermission(): String =
++    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++        Manifest.permission.READ_MEDIA_VIDEO
++    } else {
++        Manifest.permission.READ_EXTERNAL_STORAGE
+     }
+-}
+ 
+-@Composable
+-private fun MediaGalleryView(
+-    items: List<MediaItem>,
+-    folderName: String,
+-    progressSnapshot: Map<String, Float>,
+-    columnsCount: Int,
+-    onColumnsChange: (Int) -> Unit,
+-    onNavigateToVideo: (Long, String) -> Unit,
+-    onNavigateToPhoto: (Long, String) -> Unit
+-) {
+-    if (items.isEmpty()) {
+-        EmptyStateView("暂无视频文件")
++private fun photoPermission(): String =
++    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
++        Manifest.permission.READ_MEDIA_IMAGES
+     } else {
+-        LazyVerticalGrid(
+-            columns = GridCells.Fixed(columnsCount),
+-            verticalArrangement = Arrangement.spacedBy(1.5.dp),
+-            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp),
+-            modifier = Modifier.pinchToZoomColumns(
+-                columns = columnsCount,
+-                onColumnsChange = onColumnsChange
+-            )
+-        ) {
+-            gridItems(
+-                items,
+-                key = { it.storageKey },
+-                contentType = { it.type }
+-            ) { item ->
+-                MediaGalleryTile(
+-                    item = item,
+-                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
+-                    onClick = {
+-                        when (item.type) {
+-                            MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
+-                            MediaType.AUDIO -> Unit
+-                            MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
+-                        }
+-                    }
+-                )
+-            }
+-        }
++        Manifest.permission.READ_EXTERNAL_STORAGE
+     }
+-}
+ 
+-@Composable
+-fun Modifier.pinchToZoomColumns(
+-    columns: Int,
+-    onColumnsChange: (Int) -> Unit
+-): Modifier {
+-    val currentColumns by rememberUpdatedState(columns)
+-    val currentOnChange by rememberUpdatedState(onColumnsChange)
+-    return this.pointerInput(Unit) {
+-        var scaleMultiplier = 1f
+-        awaitEachGesture {
+-            awaitFirstDown(requireUnconsumed = false)
+-            var lastDistance = 0f
+-            var isPinching = false
+-            
+-            do {
+-                val event = awaitPointerEvent()
+-                val pointers = event.changes.filter { it.pressed }
+-                if (pointers.size >= 2) {
+-                    val p1 = pointers[0].position
+-                    val p2 = pointers[1].position
+-                    val dx = p1.x - p2.x
+-                    val dy = p1.y - p2.y
+-                    val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+-                    
+-                    if (!isPinching) {
+-                        lastDistance = dist
+-                        isPinching = true
+-                    } else {
+-                        if (lastDistance > 0f && dist > 0f) {
+-                            val ratio = dist / lastDistance
+-                            scaleMultiplier *= ratio
+-                            lastDistance = dist
+-                            
+-                            val cols = currentColumns
+-                            if (scaleMultiplier > 1.3f) {
+-                                if (cols > 2) {
+-                                    currentOnChange(cols - 1)
+-                                    scaleMultiplier = 1.0f
+-                                } else {
+-                                    scaleMultiplier = 1.3f
+-                                }
+-                                event.changes.forEach { it.consume() }
+-                            } else if (scaleMultiplier < 0.7f) {
+-                                if (cols < 12) {
+-                                    currentOnChange(cols + 1)
+-                                    scaleMultiplier = 1.0f
+-                                } else {
+-                                    scaleMultiplier = 0.7f
+-                                }
+-                                event.changes.forEach { it.consume() }
+-                            }
+-                        }
+-                    }
+-                } else {
+-                    isPinching = false
+-                    scaleMultiplier = 1f
+-                }
+-            } while (event.changes.any { it.pressed })
+-        }
+-    }
+-}
++private fun hasVideoPermission(context: android.content.Context): Boolean =
++    ContextCompat.checkSelfPermission(context, videoPermission()) == PackageManager.PERMISSION_GRANTED
++
++private fun hasPhotoPermission(context: android.content.Context): Boolean =
++    ContextCompat.checkSelfPermission(context, photoPermission()) == PackageManager.PERMISSION_GRANTED
+diff --git a/app/src/main/java/com/example/videoplayer/ui/screens/VideoPlayerScreen.kt b/app/src/main/java/com/example/videoplayer/ui/screens/VideoPlayerScreen.kt
+index 421ccfa..d96a60d 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/screens/VideoPlayerScreen.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/screens/VideoPlayerScreen.kt
+@@ -39,20 +39,21 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
+ import androidx.compose.material.icons.automirrored.filled.ArrowForward
+ import androidx.compose.material.icons.automirrored.filled.VolumeUp
+ import androidx.compose.material.icons.filled.BrightnessMedium
+ import androidx.compose.ui.input.pointer.pointerInput
+ import androidx.compose.foundation.gestures.detectTapGestures
+ import androidx.compose.foundation.gestures.awaitEachGesture
+ import androidx.compose.foundation.gestures.awaitFirstDown
+ import androidx.compose.foundation.gestures.calculateZoom
+ import androidx.compose.foundation.gestures.calculatePan
+ import androidx.compose.foundation.gestures.calculateCentroidSize
++import androidx.compose.foundation.interaction.collectIsPressedAsState
+ import androidx.compose.ui.input.pointer.positionChanged
+ import androidx.compose.material.icons.filled.ZoomIn
+ import androidx.compose.material.icons.filled.Cast
+ import androidx.compose.material.icons.filled.CameraAlt
+ import androidx.compose.material.icons.filled.PictureInPicture
+ import androidx.compose.material.icons.filled.Error
+ import androidx.compose.material.icons.filled.Favorite
+ import androidx.compose.material.icons.filled.FavoriteBorder
+ import androidx.compose.material.icons.filled.Info
+ import androidx.compose.material.icons.filled.Pause
+@@ -4528,21 +4529,21 @@ fun VideoPlaylistPanel(
+                                 item = item,
+                                 index = idx,
+                                 isCurrent = idx == currentIndex,
+                                 thumbSemaphore = thumbSemaphore,
+                                 onClick = { onItemClick(idx) }
+                             )
+                         }
+                     }
+ 
+                     // Jump-to-current FAB — only visible when current item is off-screen
+-                    AnimatedVisibility(
++                    androidx.compose.animation.AnimatedVisibility(
+                         visible = showJumpButton,
+                         enter = fadeIn() + slideInVertically { it / 2 },
+                         exit = fadeOut() + slideOutVertically { it / 2 },
+                         modifier = Modifier
+                             .align(Alignment.BottomCenter)
+                             .padding(bottom = 14.dp)
+                     ) {
+                         Box(
+                             modifier = Modifier
+                                 .clip(RoundedCornerShape(20.dp))
+diff --git a/app/src/main/java/com/example/videoplayer/ui/theme/Color.kt b/app/src/main/java/com/example/videoplayer/ui/theme/Color.kt
+index ebf6c96..2143d10 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/theme/Color.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/theme/Color.kt
+@@ -21,10 +21,18 @@ val GlassBlack80 = Color(0xCC000000)
+ 
+ val StatusRed = Color(0xFFEF4444)
+ val StatusGreen = Color(0xFF10B981)
+ 
+ // GitHub Carbon theme additions
+ val CarbonBg = Color(0xFF0A0B0E)
+ val CarbonCard = Color(0xFF12141A)
+ val CarbonBorder = Color(0x1AFFFFFF)
+ val GlowPurple = Color(0x228B5CF6)
+ val GlowCyan = Color(0x2206B6D4)
++
++// Video gallery: quiet charcoal surfaces with a restrained ice-blue signal.
++val GalleryBackground = Color(0xFF15171A)
++val GallerySurface = Color(0xFF1D2024)
++val GalleryRaisedSurface = Color(0xFF262B30)
++val GalleryIceBlue = Color(0xFF91BFD3)
++val GalleryText = Color(0xFFF2F4F5)
++val GalleryTextMuted = Color(0xFFA1A8AE)
+diff --git a/app/src/main/java/com/example/videoplayer/ui/theme/Theme.kt b/app/src/main/java/com/example/videoplayer/ui/theme/Theme.kt
+index 8281a8b..906bfcc 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/theme/Theme.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/theme/Theme.kt
+@@ -3,42 +3,43 @@
+ import android.app.Activity
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.darkColorScheme
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.SideEffect
+ import androidx.compose.ui.graphics.toArgb
+ import androidx.compose.ui.platform.LocalView
+ import androidx.core.view.WindowCompat
+ 
+ private val DarkColorScheme = darkColorScheme(
+-    primary = PrimaryNeonPurple,
+-    secondary = SecondaryNeonCyan,
++    primary = GalleryIceBlue,
++    secondary = GalleryIceBlue,
+     tertiary = AccentPink,
+-    background = CarbonBg,
+-    surface = CarbonCard,
+-    onPrimary = TextPrimary,
+-    onSecondary = CarbonBg,
+-    onBackground = TextPrimary,
+-    onSurface = TextPrimary
++    background = GalleryBackground,
++    surface = GallerySurface,
++    surfaceVariant = GalleryRaisedSurface,
++    onPrimary = GalleryBackground,
++    onSecondary = GalleryBackground,
++    onBackground = GalleryText,
++    onSurface = GalleryText
+ )
+ 
+ @Composable
+ fun VideoPlayerTheme(
+     content: @Composable () -> Unit
+ ) {
+     val view = LocalView.current
+     if (!view.isInEditMode) {
+         SideEffect {
+             val window = (view.context as Activity).window
+             // Use solid Carbon background for regular screens, but can be customized for glass overlays
+-            window.statusBarColor = CarbonBg.toArgb()
+-            window.navigationBarColor = CarbonBg.toArgb()
++            window.statusBarColor = GalleryBackground.toArgb()
++            window.navigationBarColor = GalleryBackground.toArgb()
+             
+             val windowInsetsController = WindowCompat.getInsetsController(window, view)
+             windowInsetsController.isAppearanceLightStatusBars = false
+             windowInsetsController.isAppearanceLightNavigationBars = false
+         }
+     }
+ 
+     MaterialTheme(
+         colorScheme = DarkColorScheme,
+         typography = Typography,
+diff --git a/app/src/main/java/com/example/videoplayer/ui/theme/Type.kt b/app/src/main/java/com/example/videoplayer/ui/theme/Type.kt
+index fedf2a8..73df3d3 100644
+--- a/app/src/main/java/com/example/videoplayer/ui/theme/Type.kt
++++ b/app/src/main/java/com/example/videoplayer/ui/theme/Type.kt
+@@ -12,21 +12,21 @@ val Typography = Typography(
+         fontWeight = FontWeight.Bold,
+         fontSize = 32.sp,
+         lineHeight = 40.sp,
+         letterSpacing = 0.sp
+     ),
+     headlineMedium = TextStyle(
+         fontFamily = FontFamily.SansSerif,
+         fontWeight = FontWeight.SemiBold,
+         fontSize = 20.sp,
+         lineHeight = 28.sp,
+-        letterSpacing = 0.sp
++        letterSpacing = (-0.2).sp
+     ),
+     titleLarge = TextStyle(
+         fontFamily = FontFamily.SansSerif,
+         fontWeight = FontWeight.Medium,
+         fontSize = 18.sp,
+         lineHeight = 24.sp,
+         letterSpacing = 0.15.sp
+     ),
+     titleMedium = TextStyle(
+         fontFamily = FontFamily.SansSerif,
+@@ -42,18 +42,25 @@ val Typography = Typography(
+         lineHeight = 20.sp,
+         letterSpacing = 0.25.sp
+     ),
+     bodyMedium = TextStyle(
+         fontFamily = FontFamily.SansSerif,
+         fontWeight = FontWeight.Normal,
+         fontSize = 12.sp,
+         lineHeight = 16.sp,
+         letterSpacing = 0.4.sp
+     ),
++    labelMedium = TextStyle(
++        fontFamily = FontFamily.SansSerif,
++        fontWeight = FontWeight.Medium,
++        fontSize = 12.sp,
++        lineHeight = 16.sp,
++        letterSpacing = 0.2.sp
++    ),
+     labelSmall = TextStyle(
+         fontFamily = FontFamily.SansSerif,
+         fontWeight = FontWeight.Medium,
+         fontSize = 10.sp,
+         lineHeight = 16.sp,
+         letterSpacing = 0.5.sp
+     )
+ )
+diff --git a/benchmark/src/main/java/com/example/videoplayer/benchmark/VideoGalleryScrollBenchmark.kt b/benchmark/src/main/java/com/example/videoplayer/benchmark/VideoGalleryScrollBenchmark.kt
+index 53a198a..d47bb4d 100644
+--- a/benchmark/src/main/java/com/example/videoplayer/benchmark/VideoGalleryScrollBenchmark.kt
++++ b/benchmark/src/main/java/com/example/videoplayer/benchmark/VideoGalleryScrollBenchmark.kt
+@@ -1,33 +1,30 @@
+ package com.example.videoplayer.benchmark
+ 
+ import androidx.benchmark.macro.FrameTimingMetric
+ import androidx.benchmark.macro.StartupMode
+ import androidx.benchmark.macro.junit4.MacrobenchmarkRule
+ import androidx.test.ext.junit.runners.AndroidJUnit4
+ import androidx.test.uiautomator.By
+ import androidx.test.uiautomator.Direction
+ import androidx.test.uiautomator.Until
+-import org.junit.Assume.assumeTrue
+ import org.junit.Rule
+ import org.junit.Test
+ import org.junit.runner.RunWith
+ 
+ @RunWith(AndroidJUnit4::class)
+ class VideoGalleryScrollBenchmark {
+     @get:Rule
+     val benchmarkRule = MacrobenchmarkRule()
+ 
+     @Test
+     fun flingVideoGallery() {
+-        assumeVideoGalleryScenarioIsAvailable()
+-
+         benchmarkRule.measureRepeated(
+             packageName = TARGET_PACKAGE,
+             metrics = listOf(FrameTimingMetric()),
+             iterations = 1,
+             startupMode = StartupMode.WARM,
+             setupBlock = {
+                 pressHome()
+                 startActivityAndWait()
+                 check(
+                     device.wait(
+@@ -37,23 +34,16 @@ class VideoGalleryScrollBenchmark {
+                 ) { "Video gallery did not appear within the timeout." }
+             }
+         ) {
+             repeat(10) {
+                 device.findObject(By.res(packageName, VIDEO_GALLERY_TAG)).fling(Direction.UP)
+                 device.waitForIdle()
+             }
+         }
+     }
+ 
+-    private fun assumeVideoGalleryScenarioIsAvailable() {
+-        assumeTrue(
+-            "Task 6 must remove this prerequisite after it adds the video-gallery tag.",
+-            false
+-        )
+-    }
+-
+     private companion object {
+         const val TARGET_PACKAGE = "com.example.videoplayer"
+         const val VIDEO_GALLERY_TAG = "video-gallery"
+         const val VIDEO_GALLERY_TIMEOUT_MS = 5_000L
+     }
+ }
+diff --git a/docs/superpowers/plans/2026-07-17-video-gallery-redesign.md b/docs/superpowers/plans/2026-07-17-video-gallery-redesign.md
+index be8e9e4..b802f20 100644
+--- a/docs/superpowers/plans/2026-07-17-video-gallery-redesign.md
++++ b/docs/superpowers/plans/2026-07-17-video-gallery-redesign.md
+@@ -80,66 +80,75 @@ Expected: BUILD SUCCESSFUL; no unresolved audio/search references.
+ - [ ] **Step 5: Commit**
+ 
+ ```powershell
+ git add app/src/main app/src/test
+ git commit -m "refactor: focus library on video and photos"
+ ```
+ 
+ ### Task 2: Establish performance trace points and benchmark fixtures
+ 
+ **Files:**
+-- Modify: `app/build.gradle.kts`
++- Modify: `settings.gradle.kts`
++- Modify: `gradle/libs.versions.toml`
++- Create: `benchmark/build.gradle.kts`
++- Create: `benchmark/src/main/java/com/example/videoplayer/benchmark/VideoGalleryScrollBenchmark.kt`
+ - Create: `app/src/main/java/com/example/videoplayer/performance/MediaTrace.kt`
+-- Create: `app/src/androidTest/java/com/example/videoplayer/VideoGalleryScrollBenchmark.kt`
+ - Create: `scripts/generate_pcm_fixtures.ps1`
+ - Modify: `.gitignore`
+ 
+ **Interfaces:**
+ - Produces: `MediaTrace.section(name: String, block: () -> T): T`.
+ - Produces: generated fixtures under ignored `test-media/pcm/`.
+ 
+-- [ ] **Step 1: Add Android benchmark dependencies and failing smoke benchmark**
++- [ ] **Step 1: Add a dedicated Android benchmark module and failing smoke benchmark**
+ 
+ ```kotlin
+-androidTestImplementation("androidx.benchmark:benchmark-macro-junit4:1.2.4")
+-androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
++include(":benchmark")
++
++// benchmark/build.gradle.kts
++plugins { alias(libs.plugins.android.test) }
++android { targetProjectPath = ":app" }
++dependencies {
++    implementation(libs.androidx.benchmark.macro.junit4)
++    implementation(libs.androidx.test.uiautomator)
++}
+ ```
+ 
+ The benchmark must launch the main activity, wait for the video grid and fling ten times while collecting `FrameTimingMetric()`.
+ 
+ - [ ] **Step 2: Run instrumentation compilation**
+ 
+-Run: `./gradlew.bat compileDebugAndroidTestKotlin`  
++Run: `./gradlew.bat :benchmark:compileBenchmarkKotlin`
+ Expected: initial FAIL until benchmark runner and source compile.
+ 
+ - [ ] **Step 3: Add trace wrapper and fixture generator**
+ 
+ ```kotlin
+ object MediaTrace {
+     inline fun <T> section(name: String, block: () -> T): T =
+         androidx.tracing.trace(name, block)
+ }
+ ```
+ 
+ The PowerShell script invokes `ffmpeg` to generate 5-second color-bar videos with sine audio for MKV/H.264/pcm_s24le, MOV/H.264/pcm_s24le, and MKV dual AAC+pcm_s24le. It exits non-zero when `ffmpeg` or `ffprobe` is missing and verifies codec names with `ffprobe`.
+ 
+ - [ ] **Step 4: Compile tests and generate fixtures where ffmpeg exists**
+ 
+-Run: `./gradlew.bat compileDebugAndroidTestKotlin`  
++Run: `./gradlew.bat :benchmark:compileBenchmarkKotlin`
+ Expected: BUILD SUCCESSFUL.  
+ Run: `powershell -ExecutionPolicy Bypass -File scripts/generate_pcm_fixtures.ps1`  
+ Expected: three verified files, or a clear prerequisite error without modifying source.
+ 
+ - [ ] **Step 5: Commit**
+ 
+ ```powershell
+-git add app/build.gradle.kts app/src/main/java/com/example/videoplayer/performance app/src/androidTest scripts .gitignore
++git add settings.gradle.kts gradle/libs.versions.toml benchmark app/src/main/java/com/example/videoplayer/performance scripts .gitignore
+ git commit -m "test: add media performance and pcm fixtures"
+ ```
+ 
+ ## Phase B — Media state and thumbnail scheduling
+ 
+ ### Task 3: Create a generation-safe media library store
+ 
+ **Files:**
+ - Create: `app/src/main/java/com/example/videoplayer/data/library/MediaLibraryState.kt`
+ - Create: `app/src/main/java/com/example/videoplayer/data/library/MediaLibraryStore.kt`
+diff --git a/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoGalleryState.kt b/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoGalleryState.kt
+index dad1143..3555424 100644
+--- a/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoGalleryState.kt
++++ b/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoGalleryState.kt
+@@ -1,12 +1,14 @@
+ package com.example.videoplayer.ui.gallery
+ 
++import kotlin.math.roundToInt
++
+ private const val MIN_GALLERY_COLUMNS = 2
+ private const val MAX_GALLERY_COLUMNS = 8
+ private const val DEFAULT_GALLERY_COLUMNS = 4
+ 
+ interface GalleryColumnStore {
+     fun read(): Int
+     fun write(columnCount: Int)
+ }
+ 
+ data class ContinueWatchingVideo<T : VideoTimelineItem>(
+@@ -45,19 +47,31 @@ fun <T : VideoTimelineItem> deriveContinueWatching(
+ ): List<ContinueWatchingVideo<T>> = videos
+     .sortedWith(compareByDescending<T> { it.dateAddedEpochSeconds }.thenBy { it.id })
+     .mapNotNull { video ->
+         val progress = playbackProgress[video.id] ?: return@mapNotNull null
+         if (progress.isFinite() && progress > 0f && progress < 1f) {
+             ContinueWatchingVideo(video, progress)
+         } else {
+             null
+         }
+     }
++    .take(5)
+ 
+ fun GalleryColumnStore.readClampedColumnCount(): Int {
+     val storedColumnCount = read()
+     val clampedColumnCount = storedColumnCount.clampGalleryColumnCount()
+     if (storedColumnCount != clampedColumnCount) write(clampedColumnCount)
+     return clampedColumnCount
+ }
+ 
+ fun Int.clampGalleryColumnCount(): Int = coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS)
++
++fun previewGalleryColumnCount(startColumns: Int, zoom: Float): Float {
++    val safeZoom = zoom.takeIf { it.isFinite() && it > 0f } ?: 1f
++    return (startColumns.clampGalleryColumnCount() / safeZoom)
++        .coerceIn(MIN_GALLERY_COLUMNS.toFloat(), MAX_GALLERY_COLUMNS.toFloat())
++}
++
++fun commitGalleryColumnCount(previewColumns: Float): Int {
++    val safePreview = previewColumns.takeIf { it.isFinite() } ?: DEFAULT_GALLERY_COLUMNS.toFloat()
++    return safePreview.roundToInt().clampGalleryColumnCount()
++}
+diff --git a/thumbnail-core/src/test/kotlin/com/example/videoplayer/ui/gallery/VideoTimelineTest.kt b/thumbnail-core/src/test/kotlin/com/example/videoplayer/ui/gallery/VideoTimelineTest.kt
+index 161bae6..8d78f15 100644
+--- a/thumbnail-core/src/test/kotlin/com/example/videoplayer/ui/gallery/VideoTimelineTest.kt
++++ b/thumbnail-core/src/test/kotlin/com/example/videoplayer/ui/gallery/VideoTimelineTest.kt
+@@ -100,20 +100,42 @@ class VideoTimelineTest {
+     @Test
+     fun repairsAnOutOfRangePersistedColumnCountBeforeTheGalleryUsesIt() {
+         val store = RecordingColumnStore(initial = 1)
+ 
+         val columnCount = store.readClampedColumnCount()
+ 
+         assertEquals(2, columnCount)
+         assertEquals(2, store.value)
+     }
+ 
++    @Test
++    fun pinchPreviewIsContinuousAndCommitSnapsOnlyOnRelease() {
++        assertEquals(3.2f, previewGalleryColumnCount(startColumns = 4, zoom = 1.25f), 0.001f)
++        assertEquals(3, commitGalleryColumnCount(previewColumns = 3.2f))
++        assertEquals(2, commitGalleryColumnCount(previewColumns = 1.4f))
++        assertEquals(8, commitGalleryColumnCount(previewColumns = 9.1f))
++    }
++
++    @Test
++    fun continueWatchingIsLimitedToFiveNewestVideos() {
++        val videos = (1..6).map { index ->
++            TimelineVideo(id = "video-$index", dateAddedEpochSeconds = index.toLong())
++        }
++
++        val result = deriveContinueWatching(
++            videos = videos,
++            playbackProgress = videos.associate { it.id to 0.5f }
++        )
++
++        assertEquals(listOf("video-6", "video-5", "video-4", "video-3", "video-2"), result.map { it.video.id })
++    }
++
+     private fun video(id: String, year: Int, month: Int, day: Int, hour: Int, minute: Int) =
+         TimelineVideo(id, instant(year, month, day, hour, minute).epochSecond)
+ 
+     private fun instant(year: Int, month: Int, day: Int, hour: Int, minute: Int): Instant =
+         ZonedDateTime.of(year, month, day, hour, minute, 0, 0, zone).toInstant()
+ 
+     private class RecordingColumnStore(initial: Int) : GalleryColumnStore {
+         var value = initial
+ 
+         override fun read(): Int = value

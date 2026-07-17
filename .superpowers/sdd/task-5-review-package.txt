@@ -1,0 +1,314 @@
+﻿COMMITS
+73387bc feat: group videos into timeline sections
+STAT
+ .../videoplayer/ui/gallery/VideoGalleryState.kt    |  63 +++++++++++
+ .../videoplayer/ui/gallery/VideoTimeline.kt        | 100 +++++++++++++++++
+ .../videoplayer/ui/gallery/VideoTimelineTest.kt    | 125 +++++++++++++++++++++
+ 3 files changed, 288 insertions(+)
+DIFF
+diff --git a/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoGalleryState.kt b/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoGalleryState.kt
+new file mode 100644
+index 0000000..dad1143
+--- /dev/null
++++ b/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoGalleryState.kt
+@@ -0,0 +1,63 @@
++package com.example.videoplayer.ui.gallery
++
++private const val MIN_GALLERY_COLUMNS = 2
++private const val MAX_GALLERY_COLUMNS = 8
++private const val DEFAULT_GALLERY_COLUMNS = 4
++
++interface GalleryColumnStore {
++    fun read(): Int
++    fun write(columnCount: Int)
++}
++
++data class ContinueWatchingVideo<T : VideoTimelineItem>(
++    val video: T,
++    val progress: Float
++)
++
++data class VideoGalleryState<T : VideoTimelineItem>(
++    val sections: List<VideoSection<T>> = emptyList(),
++    val continueWatching: List<ContinueWatchingVideo<T>> = emptyList(),
++    val columnCount: Int = DEFAULT_GALLERY_COLUMNS
++) {
++    fun persistColumnCount(requestedColumnCount: Int, store: GalleryColumnStore): Int {
++        val clampedColumnCount = requestedColumnCount.clampGalleryColumnCount()
++        store.write(clampedColumnCount)
++        return clampedColumnCount
++    }
++
++    companion object {
++        fun <T : VideoTimelineItem> create(
++            videos: List<T>,
++            playbackProgress: Map<String, Float>,
++            persistedColumns: Int,
++            sections: List<VideoSection<T>> = emptyList()
++        ): VideoGalleryState<T> = VideoGalleryState(
++            sections = sections,
++            continueWatching = deriveContinueWatching(videos, playbackProgress),
++            columnCount = persistedColumns.clampGalleryColumnCount()
++        )
++    }
++}
++
++fun <T : VideoTimelineItem> deriveContinueWatching(
++    videos: List<T>,
++    playbackProgress: Map<String, Float>
++): List<ContinueWatchingVideo<T>> = videos
++    .sortedWith(compareByDescending<T> { it.dateAddedEpochSeconds }.thenBy { it.id })
++    .mapNotNull { video ->
++        val progress = playbackProgress[video.id] ?: return@mapNotNull null
++        if (progress.isFinite() && progress > 0f && progress < 1f) {
++            ContinueWatchingVideo(video, progress)
++        } else {
++            null
++        }
++    }
++
++fun GalleryColumnStore.readClampedColumnCount(): Int {
++    val storedColumnCount = read()
++    val clampedColumnCount = storedColumnCount.clampGalleryColumnCount()
++    if (storedColumnCount != clampedColumnCount) write(clampedColumnCount)
++    return clampedColumnCount
++}
++
++fun Int.clampGalleryColumnCount(): Int = coerceIn(MIN_GALLERY_COLUMNS, MAX_GALLERY_COLUMNS)
+diff --git a/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoTimeline.kt b/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoTimeline.kt
+new file mode 100644
+index 0000000..9b5e67d
+--- /dev/null
++++ b/thumbnail-core/src/main/kotlin/com/example/videoplayer/ui/gallery/VideoTimeline.kt
+@@ -0,0 +1,100 @@
++package com.example.videoplayer.ui.gallery
++
++import java.time.DayOfWeek
++import java.time.Instant
++import java.time.YearMonth
++import java.time.ZoneId
++import java.time.temporal.TemporalAdjusters
++
++interface VideoTimelineItem {
++    val id: String
++    val dateAddedEpochSeconds: Long
++}
++
++data class TimelineVideo(
++    override val id: String,
++    override val dateAddedEpochSeconds: Long
++) : VideoTimelineItem
++
++enum class VideoSectionKind {
++    TODAY,
++    YESTERDAY,
++    THIS_WEEK,
++    MONTH
++}
++
++sealed class VideoSectionKey {
++    abstract val kind: VideoSectionKind
++    abstract val stableKey: String
++
++    object Today : VideoSectionKey() {
++        override val kind = VideoSectionKind.TODAY
++        override val stableKey = "today"
++    }
++
++    object Yesterday : VideoSectionKey() {
++        override val kind = VideoSectionKind.YESTERDAY
++        override val stableKey = "yesterday"
++    }
++
++    object ThisWeek : VideoSectionKey() {
++        override val kind = VideoSectionKind.THIS_WEEK
++        override val stableKey = "this-week"
++    }
++
++    data class Month(val yearMonth: YearMonth) : VideoSectionKey() {
++        override val kind = VideoSectionKind.MONTH
++        override val stableKey = "month:$yearMonth"
++    }
++}
++
++data class VideoSection<T : VideoTimelineItem>(
++    val key: VideoSectionKey,
++    val items: List<T>
++) {
++    val stableKey: String
++        get() = key.stableKey
++
++    val itemKeys: List<String>
++        get() = items.map { it.id }
++}
++
++fun <T : VideoTimelineItem> groupVideos(
++    items: List<T>,
++    zoneId: ZoneId,
++    now: Instant
++): List<VideoSection<T>> {
++    if (items.isEmpty()) return emptyList()
++
++    val today = now.atZone(zoneId).toLocalDate()
++    val yesterday = today.minusDays(1)
++    val weekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
++    val sortedItems = items.sortedWith(
++        compareByDescending<T> { it.dateAddedEpochSeconds }.thenBy { it.id }
++    )
++    val todayItems = mutableListOf<T>()
++    val yesterdayItems = mutableListOf<T>()
++    val thisWeekItems = mutableListOf<T>()
++    val monthlyItems = linkedMapOf<YearMonth, MutableList<T>>()
++
++    sortedItems.forEach { item ->
++        val date = Instant.ofEpochSecond(item.dateAddedEpochSeconds).atZone(zoneId).toLocalDate()
++        when {
++            date == today -> todayItems += item
++            date == yesterday -> yesterdayItems += item
++            date in weekStart..today -> thisWeekItems += item
++            else -> monthlyItems.getOrPut(YearMonth.from(date)) { mutableListOf() } += item
++        }
++    }
++
++    return buildList {
++        if (todayItems.isNotEmpty()) add(VideoSection(VideoSectionKey.Today, todayItems))
++        if (yesterdayItems.isNotEmpty()) add(VideoSection(VideoSectionKey.Yesterday, yesterdayItems))
++        if (thisWeekItems.isNotEmpty()) add(VideoSection(VideoSectionKey.ThisWeek, thisWeekItems))
++        monthlyItems.entries
++            .sortedByDescending { it.key }
++            .forEach { (yearMonth, videos) ->
++                add(VideoSection(VideoSectionKey.Month(yearMonth), videos))
++            }
++    }
++}
+diff --git a/thumbnail-core/src/test/kotlin/com/example/videoplayer/ui/gallery/VideoTimelineTest.kt b/thumbnail-core/src/test/kotlin/com/example/videoplayer/ui/gallery/VideoTimelineTest.kt
+new file mode 100644
+index 0000000..161bae6
+--- /dev/null
++++ b/thumbnail-core/src/test/kotlin/com/example/videoplayer/ui/gallery/VideoTimelineTest.kt
+@@ -0,0 +1,125 @@
++package com.example.videoplayer.ui.gallery
++
++import java.time.Instant
++import java.time.ZoneId
++import java.time.ZonedDateTime
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class VideoTimelineTest {
++    private val zone = ZoneId.of("Asia/Shanghai")
++    private val now = instant(2026, 7, 17, 0, 5)
++
++    @Test
++    fun groupsVideosAcrossMidnightWithoutUsingTheDeviceZone() {
++        val justAfterMidnight = video("today", 2026, 7, 17, 0, 1)
++        val justBeforeMidnight = video("yesterday", 2026, 7, 16, 23, 59)
++
++        val sections = groupVideos(listOf(justBeforeMidnight, justAfterMidnight), zone, now)
++
++        assertEquals(
++            listOf(VideoSectionKey.Today, VideoSectionKey.Yesterday),
++            sections.map { it.key }
++        )
++        assertEquals(listOf("today"), sections[0].items.map { it.id })
++        assertEquals(listOf("yesterday"), sections[1].items.map { it.id })
++    }
++
++    @Test
++    fun keepsSundayInYesterdayWhenNowIsMondayAtTheWeekBoundary() {
++        val monday = instant(2026, 7, 20, 9, 0)
++        val sunday = video("sunday", 2026, 7, 19, 22, 0)
++        val previousThursday = video("previous-week", 2026, 7, 16, 12, 0)
++
++        val sections = groupVideos(listOf(previousThursday, sunday), zone, monday)
++
++        assertEquals(VideoSectionKey.Yesterday, sections[0].key)
++        assertEquals(listOf("sunday"), sections[0].items.map { it.id })
++        assertEquals(
++            VideoSectionKey.Month(java.time.YearMonth.of(2026, 7)),
++            sections[1].key
++        )
++    }
++
++    @Test
++    fun groupsOlderVideosByYearMonthAtMonthBoundary() {
++        val newestJuly = video("july", 2026, 7, 13, 8, 0)
++        val june = video("june", 2026, 6, 30, 23, 59)
++        val may = video("may", 2026, 5, 31, 23, 59)
++
++        val sections = groupVideos(listOf(may, june, newestJuly), zone, now)
++
++        assertEquals(VideoSectionKey.ThisWeek, sections[0].key)
++        assertEquals(
++            listOf(
++                VideoSectionKey.Month(java.time.YearMonth.of(2026, 6)),
++                VideoSectionKey.Month(java.time.YearMonth.of(2026, 5))
++            ),
++            sections.drop(1).map { it.key }
++        )
++    }
++
++    @Test
++    fun sortsSectionsAndItemsByDescendingAddedTimeWithStableItemKeys() {
++        val oldest = video("oldest", 2026, 6, 1, 10, 0)
++        val newer = video("newer", 2026, 7, 16, 9, 0)
++        val newest = video("newest", 2026, 7, 16, 10, 0)
++
++        val sections = groupVideos(listOf(oldest, newer, newest), zone, now)
++
++        assertEquals(listOf("newest", "newer"), sections.first().items.map { it.id })
++        assertEquals("yesterday", sections.first().stableKey)
++        assertEquals(listOf("newest", "newer"), sections.first().itemKeys)
++    }
++
++    @Test
++    fun returnsNoSectionsForAnEmptyLibrary() {
++        assertTrue(groupVideos(emptyList(), zone, now).isEmpty())
++    }
++
++    @Test
++    fun derivesOnlyUnfinishedVideosForContinueWatchingAndClampsPersistedColumns() {
++        val partial = video("partial", 2026, 7, 16, 10, 0)
++        val fresh = video("fresh", 2026, 7, 16, 9, 0)
++        val finished = video("finished", 2026, 7, 16, 8, 0)
++        val store = RecordingColumnStore(initial = 20)
++
++        val state = VideoGalleryState.create(
++            videos = listOf(fresh, finished, partial),
++            playbackProgress = mapOf("partial" to 0.4f, "fresh" to 0f, "finished" to 1f),
++            persistedColumns = store.read()
++        )
++
++        assertEquals(listOf("partial"), state.continueWatching.map { it.video.id })
++        assertEquals(8, state.columnCount)
++        assertEquals(2, state.persistColumnCount(-5, store))
++        assertEquals(2, store.value)
++    }
++
++    @Test
++    fun repairsAnOutOfRangePersistedColumnCountBeforeTheGalleryUsesIt() {
++        val store = RecordingColumnStore(initial = 1)
++
++        val columnCount = store.readClampedColumnCount()
++
++        assertEquals(2, columnCount)
++        assertEquals(2, store.value)
++    }
++
++    private fun video(id: String, year: Int, month: Int, day: Int, hour: Int, minute: Int) =
++        TimelineVideo(id, instant(year, month, day, hour, minute).epochSecond)
++
++    private fun instant(year: Int, month: Int, day: Int, hour: Int, minute: Int): Instant =
++        ZonedDateTime.of(year, month, day, hour, minute, 0, 0, zone).toInstant()
++
++    private class RecordingColumnStore(initial: Int) : GalleryColumnStore {
++        var value = initial
++
++        override fun read(): Int = value
++
++        override fun write(columnCount: Int) {
++            value = columnCount
++        }
++    }
++}
