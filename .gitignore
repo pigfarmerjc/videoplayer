@@ -20,6 +20,7 @@ local.properties
 /screen*.png
 /screenshot.png
 /window_*.xml
+/test-media/pcm/
 
 # Local isolated development worktrees
 /.worktrees/

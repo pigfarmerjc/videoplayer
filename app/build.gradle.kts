@@ -97,6 +97,7 @@ dependencies {
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.session)
     implementation(libs.libvlc.all)
+    implementation("androidx.tracing:tracing-ktx:1.2.0")
     coreLibraryDesugaring(libs.desugar.jdk.libs)
     
     // Coil (Image Loading)
@@ -107,6 +108,8 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation("androidx.benchmark:benchmark-macro-junit4:1.2.4")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
