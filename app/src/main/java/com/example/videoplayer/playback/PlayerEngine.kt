@@ -7,6 +7,7 @@ enum class EngineChoice {
 
 sealed interface EngineEvent {
     data class PositionChanged(val positionMs: Long) : EngineEvent
+    data class PlayWhenReadyChanged(val playWhenReady: Boolean) : EngineEvent
     data class PlayingChanged(val isPlaying: Boolean) : EngineEvent
     data class SpeedChanged(val speed: Float) : EngineEvent
     data class AudioTrackChanged(val trackId: String?) : EngineEvent

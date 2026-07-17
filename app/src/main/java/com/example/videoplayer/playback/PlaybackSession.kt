@@ -17,6 +17,7 @@ data class PlaybackSession(
 
 data class PlaybackSnapshot(
     val positionMs: Long = 0L,
+    val playWhenReady: Boolean = false,
     val isPlaying: Boolean = false,
     val speed: Float = 1f,
     val selectedAudioTrackId: String? = null,
@@ -25,13 +26,15 @@ data class PlaybackSnapshot(
 
 data class PlaybackState(
     val session: PlaybackSession? = null,
-    val engineChoice: EngineChoice = EngineChoice.EXO,
+    val engineChoice: EngineChoice? = null,
     val generation: Long = 0L,
     val positionMs: Long = 0L,
+    val playWhenReady: Boolean = false,
     val isPlaying: Boolean = false,
     val speed: Float = 1f,
     val selectedAudioTrackId: String? = null,
     val selectedSubtitleTrackId: String? = null,
+    val hasUsableEngine: Boolean = false,
     val isReleased: Boolean = false,
     val error: Throwable? = null
 )

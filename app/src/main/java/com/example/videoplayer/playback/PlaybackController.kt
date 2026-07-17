@@ -1,8 +1,10 @@
 package com.example.videoplayer.playback
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,21 +12,40 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+class PlaybackControllerClosedException(
+    message: String,
+    cause: Throwable? = null
+) : IllegalStateException(message, cause)
+
 class PlaybackController(
     private val engineFactory: PlayerEngineFactory,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
     initialEngineChoice: EngineChoice = EngineChoice.EXO
 ) {
     private val commands = Channel<Command>(Channel.UNLIMITED)
-    private val _state = MutableStateFlow(PlaybackState(engineChoice = initialEngineChoice))
+    private val _state = MutableStateFlow(PlaybackState())
+    private val preferredInitialChoice = initialEngineChoice
     private val engineListener = PlayerEngine.Listener { generation, event ->
         commands.trySend(Command.EngineCallback(generation, event))
     }
+    private val actorJob: Job
 
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
 
     init {
-        scope.launch { processCommands() }
+        actorJob = scope.launch { processCommands() }
+        actorJob.invokeOnCompletion { cause ->
+            closeAndDrain(
+                PlaybackControllerClosedException(
+                    message = if (_state.value.isReleased) {
+                        "PlaybackController has been released"
+                    } else {
+                        "PlaybackController actor has stopped"
+                    },
+                    cause = cause
+                )
+            )
+        }
     }
 
     suspend fun load(session: PlaybackSession) {
@@ -58,16 +79,54 @@ class PlaybackController(
 
     private suspend fun submit(command: (CompletableDeferred<Unit>) -> Command) {
         val completion = CompletableDeferred<Unit>()
-        commands.send(command(completion))
+        val result = commands.trySend(command(completion))
+        if (result.isFailure) {
+            throw PlaybackControllerClosedException(
+                "PlaybackController is not accepting commands",
+                result.exceptionOrNull()
+            )
+        }
         completion.await()
+    }
+
+    private fun closeAndDrain(error: PlaybackControllerClosedException) {
+        commands.close(error)
+        while (true) {
+            val command = commands.tryReceive().getOrNull() ?: break
+            command.completion?.completeExceptionally(error)
+        }
     }
 
     private suspend fun processCommands() {
         var activeEngine: PlayerEngine? = null
+        var hasUsableEngine = false
+        var acceptedGeneration: Long? = null
         var generation = 0L
         var currentSession: PlaybackSession? = null
-        var currentChoice = _state.value.engineChoice
-        var released = false
+        var preferredChoice = preferredInitialChoice
+
+        fun stateFor(
+            session: PlaybackSession?,
+            engine: PlayerEngine?,
+            usable: Boolean,
+            error: Throwable?
+        ) = PlaybackState(
+            session = session,
+            engineChoice = engine?.choice,
+            generation = generation,
+            positionMs = session?.positionMs ?: 0L,
+            playWhenReady = session?.playWhenReady ?: false,
+            isPlaying = false,
+            speed = session?.speed ?: 1f,
+            selectedAudioTrackId = session?.selectedAudioTrackId,
+            selectedSubtitleTrackId = session?.selectedSubtitleTrackId,
+            hasUsableEngine = usable,
+            error = error
+        )
+
+        fun publish(error: Throwable? = null) {
+            _state.value = stateFor(currentSession, activeEngine, hasUsableEngine, error)
+        }
 
         suspend fun restore(engine: PlayerEngine, session: PlaybackSession, nextGeneration: Long) {
             engine.load(session, nextGeneration)
@@ -78,77 +137,125 @@ class PlaybackController(
             if (session.playWhenReady) engine.play() else engine.pause()
         }
 
-        fun publish(session: PlaybackSession, choice: EngineChoice, nextGeneration: Long) {
-            _state.value = PlaybackState(
-                session = session,
-                engineChoice = choice,
-                generation = nextGeneration,
-                positionMs = session.positionMs,
-                isPlaying = session.playWhenReady,
-                speed = session.speed,
-                selectedAudioTrackId = session.selectedAudioTrackId,
-                selectedSubtitleTrackId = session.selectedSubtitleTrackId
-            )
-        }
-
-        suspend fun activate(choice: EngineChoice, session: PlaybackSession, nextGeneration: Long): PlayerEngine {
-            val engine = engineFactory.create(choice)
-            engine.setListener(engineListener)
-            return try {
-                restore(engine, session, nextGeneration)
-                engine
-            } catch (error: Throwable) {
-                runCatching { engine.release() }
-                throw error
+        suspend fun releaseQuarantinedEngine(errorOnSuccess: Throwable? = null) {
+            val engine = checkNotNull(activeEngine)
+            hasUsableEngine = false
+            acceptedGeneration = null
+            publish()
+            try {
+                engine.release()
+                activeEngine = null
+                publish(errorOnSuccess)
+            } catch (releaseError: Throwable) {
+                publish(releaseError)
+                throw releaseError
             }
         }
 
-        fun takeActiveEngine(): PlayerEngine? = activeEngine.also { activeEngine = null }
+        suspend fun cleanupAfterRestoreFailure(restoreError: Throwable) {
+            val engine = checkNotNull(activeEngine)
+            hasUsableEngine = false
+            acceptedGeneration = null
+            publish(restoreError)
+            try {
+                engine.release()
+                activeEngine = null
+                publish(restoreError)
+            } catch (releaseError: Throwable) {
+                restoreError.addSuppressed(releaseError)
+                publish(restoreError)
+            }
+            throw restoreError
+        }
+
+        suspend fun activate(choice: EngineChoice, session: PlaybackSession) {
+            check(activeEngine == null) { "Cannot activate a second player engine" }
+            generation++
+            currentSession = session
+            acceptedGeneration = null
+            hasUsableEngine = false
+            val engine = try {
+                engineFactory.create(choice)
+            } catch (createError: Throwable) {
+                publish(createError)
+                throw createError
+            }
+            activeEngine = engine
+            publish()
+            try {
+                engine.setListener(engineListener)
+                restore(engine, session, generation)
+                hasUsableEngine = true
+                acceptedGeneration = generation
+                publish()
+            } catch (restoreError: Throwable) {
+                cleanupAfterRestoreFailure(restoreError)
+            }
+        }
+
+        suspend fun reloadActive(session: PlaybackSession) {
+            val engine = checkNotNull(activeEngine)
+            check(hasUsableEngine) { "Player engine is quarantined" }
+            generation++
+            currentSession = session
+            hasUsableEngine = false
+            acceptedGeneration = null
+            publish()
+            try {
+                restore(engine, session, generation)
+                hasUsableEngine = true
+                acceptedGeneration = generation
+                publish()
+            } catch (restoreError: Throwable) {
+                cleanupAfterRestoreFailure(restoreError)
+            }
+        }
+
+        suspend fun requireUsableEngine(): PlayerEngine {
+            check(hasUsableEngine) { "No usable player engine" }
+            return checkNotNull(activeEngine) { "No active player engine" }
+        }
 
         for (command in commands) {
             try {
                 when (command) {
                     is Command.Load -> {
-                        check(!released) { "PlaybackController has been released" }
-                        generation++
-                        val engine = activeEngine
-                        if (engine == null) {
-                            activeEngine = activate(currentChoice, command.session, generation)
-                        } else {
-                            restore(engine, command.session, generation)
-                        }
                         currentSession = command.session
-                        publish(command.session, currentChoice, generation)
+                        if (activeEngine != null && !hasUsableEngine) {
+                            releaseQuarantinedEngine()
+                        }
+                        if (activeEngine == null) {
+                            activate(preferredChoice, command.session)
+                        } else {
+                            reloadActive(command.session)
+                        }
                         command.completion.complete(Unit)
                     }
 
                     is Command.Play -> {
-                        check(!released) { "PlaybackController has been released" }
-                        activeEngine?.play()
+                        requireUsableEngine().play()
                         currentSession = currentSession?.copy(playWhenReady = true)
                         _state.value = _state.value.copy(
                             session = currentSession,
-                            isPlaying = true,
+                            playWhenReady = true,
                             error = null
                         )
                         command.completion.complete(Unit)
                     }
 
                     is Command.Pause -> {
-                        check(!released) { "PlaybackController has been released" }
-                        activeEngine?.pause()
+                        requireUsableEngine().pause()
                         currentSession = currentSession?.copy(playWhenReady = false)
                         _state.value = _state.value.copy(
                             session = currentSession,
-                            isPlaying = false,
+                            playWhenReady = false,
                             error = null
                         )
                         command.completion.complete(Unit)
                     }
 
                     is Command.SeekTo -> {
-                        check(!released) { "PlaybackController has been released" }
-                        activeEngine?.seekTo(command.positionMs)
+                        requireUsableEngine().seekTo(command.positionMs)
                         currentSession = currentSession?.copy(positionMs = command.positionMs)
                         _state.value = _state.value.copy(
                             session = currentSession,
@@ -159,8 +266,7 @@ class PlaybackController(
                     }
 
                     is Command.SelectAudioTrack -> {
-                        check(!released) { "PlaybackController has been released" }
-                        activeEngine?.selectAudioTrack(command.trackId)
+                        requireUsableEngine().selectAudioTrack(command.trackId)
                         currentSession = currentSession?.copy(selectedAudioTrackId = command.trackId)
                         _state.value = _state.value.copy(
                             session = currentSession,
@@ -171,51 +277,48 @@ class PlaybackController(
                     }
 
                     is Command.SwitchEngine -> {
-                        check(!released) { "PlaybackController has been released" }
-                        val oldEngine = activeEngine
+                        val engine = activeEngine
                         val session = currentSession
-                        if (oldEngine == null || session == null) {
-                            currentChoice = command.choice
-                            _state.value = _state.value.copy(engineChoice = command.choice, error = null)
-                        } else if (oldEngine.choice != command.choice) {
-                            val snapshot = oldEngine.snapshot().normalized(session)
-                            val restoredSession = session.copy(
-                                positionMs = snapshot.positionMs,
-                                playWhenReady = snapshot.isPlaying,
-                                speed = snapshot.speed,
-                                selectedAudioTrackId = snapshot.selectedAudioTrackId,
-                                selectedSubtitleTrackId = snapshot.selectedSubtitleTrackId
-                            )
-                            takeActiveEngine()?.release()
-                            generation++
-                            currentChoice = command.choice
-                            activeEngine = activate(command.choice, restoredSession, generation)
-                            currentSession = restoredSession
-                            publish(restoredSession, command.choice, generation)
+                        if (engine == null) {
+                            preferredChoice = command.choice
+                            if (session != null) activate(command.choice, session) else publish()
+                        } else if (hasUsableEngine && engine.choice == command.choice) {
+                            // Already using the requested engine; preserve observable state.
+                        } else {
+                            if (hasUsableEngine) {
+                                val snapshot = engine.snapshot().normalized(checkNotNull(session))
+                                currentSession = checkNotNull(session).copy(
+                                    positionMs = snapshot.positionMs,
+                                    playWhenReady = snapshot.playWhenReady,
+                                    speed = snapshot.speed,
+                                    selectedAudioTrackId = snapshot.selectedAudioTrackId,
+                                    selectedSubtitleTrackId = snapshot.selectedSubtitleTrackId
+                                )
+                            }
+                            releaseQuarantinedEngine()
+                            preferredChoice = command.choice
+                            activate(command.choice, checkNotNull(currentSession))
                         }
                         command.completion.complete(Unit)
                     }
 
                     is Command.Release -> {
-                        if (!released) {
-                            released = true
-                            val engine = takeActiveEngine()
-                            try {
-                                engine?.release()
-                            } finally {
-                                currentSession = null
-                                _state.value = _state.value.copy(
-                                    session = null,
-                                    isPlaying = false,
-                                    isReleased = true
-                                )
-                            }
+                        if (activeEngine != null) {
+                            releaseQuarantinedEngine()
                         }
+                        currentSession = null
+                        acceptedGeneration = null
+                        hasUsableEngine = false
+                        _state.value = PlaybackState(
+                            generation = generation,
+                            isReleased = true
+                        )
                         command.completion.complete(Unit)
+                        return
                     }
 
                     is Command.EngineCallback -> {
-                        if (!released && activeEngine != null && command.generation == generation) {
+                        if (hasUsableEngine && command.generation == acceptedGeneration) {
                             when (val event = command.event) {
                                 is EngineEvent.PositionChanged -> {
                                     val positionMs = event.positionMs.coerceAtLeast(0L)
@@ -223,9 +326,16 @@ class PlaybackController(
                                     _state.value = _state.value.copy(session = currentSession, positionMs = positionMs)
                                 }
 
+                                is EngineEvent.PlayWhenReadyChanged -> {
+                                    currentSession = currentSession?.copy(playWhenReady = event.playWhenReady)
+                                    _state.value = _state.value.copy(
+                                        session = currentSession,
+                                        playWhenReady = event.playWhenReady
+                                    )
+                                }
+
                                 is EngineEvent.PlayingChanged -> {
-                                    currentSession = currentSession?.copy(playWhenReady = event.isPlaying)
-                                    _state.value = _state.value.copy(session = currentSession, isPlaying = event.isPlaying)
+                                    _state.value = _state.value.copy(isPlaying = event.isPlaying)
                                 }
 
                                 is EngineEvent.SpeedChanged -> if (event.speed.isFinite() && event.speed > 0f) {
@@ -235,12 +345,18 @@ class PlaybackController(
 
                                 is EngineEvent.AudioTrackChanged -> {
                                     currentSession = currentSession?.copy(selectedAudioTrackId = event.trackId)
-                                    _state.value = _state.value.copy(session = currentSession, selectedAudioTrackId = event.trackId)
+                                    _state.value = _state.value.copy(
+                                        session = currentSession,
+                                        selectedAudioTrackId = event.trackId
+                                    )
                                 }
 
                                 is EngineEvent.SubtitleTrackChanged -> {
                                     currentSession = currentSession?.copy(selectedSubtitleTrackId = event.trackId)
-                                    _state.value = _state.value.copy(session = currentSession, selectedSubtitleTrackId = event.trackId)
+                                    _state.value = _state.value.copy(
+                                        session = currentSession,
+                                        selectedSubtitleTrackId = event.trackId
+                                    )
                                 }
 
                                 is EngineEvent.Error -> _state.value = _state.value.copy(error = event.cause)
@@ -248,8 +364,13 @@ class PlaybackController(
                         }
                     }
                 }
+            } catch (error: CancellationException) {
+                command.completion?.completeExceptionally(error)
+                throw error
             } catch (error: Throwable) {
-                _state.value = _state.value.copy(error = error)
+                if (_state.value.error !== error) {
+                    _state.value = _state.value.copy(error = error)
+                }
                 command.completion?.completeExceptionally(error)
             }
         }

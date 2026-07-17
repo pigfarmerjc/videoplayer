@@ -6,10 +6,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class PlaybackControllerTest {
@@ -36,18 +39,66 @@ class PlaybackControllerTest {
     }
 
     @Test
-    fun releaseIsExactOnceEvenWhenRequestedRepeatedly() = runBlocking {
+    fun successfulReleaseClosesControllerAndCannotReleaseEngineAgain() = runBlocking {
         val factory = FakeEngineFactory()
         val controller = controller(factory)
         controller.load(session("video"))
         val engine = factory.single(EngineChoice.EXO)
 
         controller.release()
-        controller.release()
+        assertFails<PlaybackControllerClosedException> {
+            withTimeout(1_000) { controller.release() }
+        }
 
-        assertEquals(1, engine.releaseCount)
+        assertEquals(1, engine.releaseAttempts)
+        assertEquals(1, engine.successfulReleases)
         assertEquals(0, factory.activeCount)
         assertTrue(controller.state.value.isReleased)
+    }
+
+    @Test
+    fun releaseFailureKeepsEngineAndCanBeRetriedWithoutFalseReleasedState() = runBlocking {
+        val factory = FakeEngineFactory()
+        val controller = controller(factory)
+        controller.load(session("video"))
+        val engine = factory.single(EngineChoice.EXO)
+        val releaseFailure = IllegalStateException("release failed")
+        engine.releaseFailure = releaseFailure
+
+        assertSame(releaseFailure, assertFails<IllegalStateException> { controller.release() })
+        assertEquals(1, factory.activeCount)
+        assertEquals(EngineChoice.EXO, controller.state.value.engineChoice)
+        assertFalse(controller.state.value.isReleased)
+        assertSame(releaseFailure, controller.state.value.error)
+
+        controller.release()
+
+        assertEquals(2, engine.releaseAttempts)
+        assertEquals(1, engine.successfulReleases)
+        assertEquals(0, factory.activeCount)
+        assertTrue(controller.state.value.isReleased)
+    }
+
+    @Test
+    fun switchReleaseFailureNeverActivatesSecondEngineAndRetryRecovers() = runBlocking {
+        val factory = FakeEngineFactory()
+        val controller = controller(factory)
+        controller.load(session("video"))
+        val oldEngine = factory.single(EngineChoice.EXO)
+        val releaseFailure = IllegalStateException("release failed")
+        oldEngine.releaseFailure = releaseFailure
+
+        assertSame(releaseFailure, assertFails<IllegalStateException> { controller.switchEngine(EngineChoice.VLC) })
+        assertEquals(1, factory.activeCount)
+        assertEquals(1, factory.all(EngineChoice.EXO).size)
+        assertTrue(factory.all(EngineChoice.VLC).isEmpty())
+        assertEquals(EngineChoice.EXO, controller.state.value.engineChoice)
+
+        controller.switchEngine(EngineChoice.VLC)
+
+        assertEquals(1, factory.activeCount)
+        assertEquals(1, factory.maxActiveCount)
+        assertEquals(EngineChoice.VLC, controller.state.value.engineChoice)
     }
 
     @Test
@@ -60,12 +111,14 @@ class PlaybackControllerTest {
         controller.switchEngine(EngineChoice.VLC)
         val newEngine = factory.single(EngineChoice.VLC)
 
-        oldEngine.emit(oldGeneration, EngineEvent.PositionChanged(900L))
         newEngine.emit(newEngine.loadedGeneration, EngineEvent.PositionChanged(5_000L))
-        controller.pause()
+        oldEngine.emit(oldGeneration, EngineEvent.Error(IllegalStateException("stale")))
+        newEngine.emit(newEngine.loadedGeneration, EngineEvent.PositionChanged(6_000L))
+        controller.switchEngine(EngineChoice.VLC)
 
-        assertEquals(5_000L, controller.state.value.positionMs)
+        assertEquals(6_000L, controller.state.value.positionMs)
         assertEquals(newEngine.loadedGeneration, controller.state.value.generation)
+        assertNull(controller.state.value.error)
     }
 
     @Test
@@ -84,7 +137,8 @@ class PlaybackControllerTest {
         val oldEngine = factory.single(EngineChoice.EXO)
         oldEngine.snapshot = PlaybackSnapshot(
             positionMs = 12_345L,
-            isPlaying = true,
+            playWhenReady = true,
+            isPlaying = false,
             speed = 1.5f,
             selectedAudioTrackId = "audio-pcm",
             selectedSubtitleTrackId = "subtitle-en"
@@ -93,7 +147,7 @@ class PlaybackControllerTest {
         controller.switchEngine(EngineChoice.VLC)
 
         val newEngine = factory.single(EngineChoice.VLC)
-        assertEquals(1, oldEngine.releaseCount)
+        assertEquals(1, oldEngine.successfulReleases)
         assertEquals(0, oldEngine.activeLoads)
         assertEquals(1, newEngine.activeLoads)
         assertEquals(1, factory.maxActiveCount)
@@ -108,7 +162,101 @@ class PlaybackControllerTest {
             newEngine.calls
         )
         assertEquals(12_345L, controller.state.value.positionMs)
-        assertTrue(controller.state.value.isPlaying)
+        assertTrue(controller.state.value.playWhenReady)
+        assertFalse(controller.state.value.isPlaying)
+    }
+
+    @Test
+    fun failedReloadQuarantinesEngineAndRejectsOldAndFailedGenerationCallbacks() = runBlocking {
+        val factory = FakeEngineFactory()
+        val controller = controller(factory)
+        controller.load(session("first"))
+        val engine = factory.single(EngineChoice.EXO)
+        val oldGeneration = engine.loadedGeneration
+        val loadFailure = IllegalStateException("reload failed")
+        engine.loadFailure = loadFailure
+
+        assertSame(loadFailure, assertFails<IllegalStateException> { controller.load(session("second", positionMs = 500L)) })
+        val failedGeneration = engine.loadedGeneration
+        assertTrue(failedGeneration > oldGeneration)
+        assertEquals("second", controller.state.value.session?.mediaUri)
+        assertNull(controller.state.value.engineChoice)
+        assertFalse(controller.state.value.hasUsableEngine)
+        assertSame(loadFailure, controller.state.value.error)
+
+        engine.emit(oldGeneration, EngineEvent.PositionChanged(10L))
+        engine.emit(failedGeneration, EngineEvent.PositionChanged(20L))
+        engine.emit(failedGeneration, EngineEvent.Error(IllegalStateException("callback")))
+
+        assertEquals(500L, controller.state.value.positionMs)
+        assertSame(loadFailure, controller.state.value.error)
+    }
+
+    @Test
+    fun failedSwitchActivationLeavesNoEngineAndLoadRetriesPreferredChoice() = runBlocking {
+        val factory = FakeEngineFactory().apply {
+            failNextLoad(EngineChoice.VLC, IllegalStateException("vlc load failed"))
+        }
+        val controller = controller(factory)
+        controller.load(session("movie.mkv"))
+
+        assertFails<IllegalStateException> { controller.switchEngine(EngineChoice.VLC) }
+        assertEquals(0, factory.activeCount)
+        assertNull(controller.state.value.engineChoice)
+        assertFalse(controller.state.value.hasUsableEngine)
+        assertFails<IllegalStateException> { controller.play() }
+        assertFalse(controller.state.value.playWhenReady)
+        assertFalse(controller.state.value.isPlaying)
+
+        controller.load(controller.state.value.session!!)
+
+        assertEquals(1, factory.activeCount)
+        assertEquals(EngineChoice.VLC, controller.state.value.engineChoice)
+        assertTrue(controller.state.value.hasUsableEngine)
+    }
+
+    @Test
+    fun activationCleanupFailureRetainsQuarantinedEngineUntilRetryReleasesIt() = runBlocking {
+        val factory = FakeEngineFactory().apply {
+            failNextLoad(EngineChoice.EXO, IllegalStateException("load failed"))
+            failNextRelease(EngineChoice.EXO, IllegalStateException("cleanup failed"))
+        }
+        val controller = controller(factory)
+
+        assertFails<IllegalStateException> { controller.load(session("video")) }
+        assertEquals(1, factory.activeCount)
+        assertEquals(EngineChoice.EXO, controller.state.value.engineChoice)
+        assertFalse(controller.state.value.hasUsableEngine)
+
+        controller.load(session("video"))
+
+        assertEquals(1, factory.activeCount)
+        assertEquals(1, factory.maxActiveCount)
+        assertEquals(2, factory.all(EngineChoice.EXO).size)
+        assertTrue(controller.state.value.hasUsableEngine)
+    }
+
+    @Test
+    fun terminalReleaseDrainsQueuedCommandsAndLaterSubmitFailsImmediately() = runBlocking {
+        val factory = FakeEngineFactory()
+        val controller = controller(factory)
+        controller.load(session("video"))
+        val engine = factory.single(EngineChoice.EXO)
+        engine.blockNextPlay = CompletableDeferred()
+        val play = async { controller.play() }
+        engine.playStarted.await()
+        val release = async { controller.release() }
+        val queuedSeek = async { runCatching { controller.seekTo(99L) } }
+
+        engine.blockNextPlay?.complete(Unit)
+        play.await()
+        release.await()
+
+        assertTrue(withTimeout(1_000) { queuedSeek.await() }.exceptionOrNull() is PlaybackControllerClosedException)
+        assertFails<PlaybackControllerClosedException> {
+            withTimeout(1_000) { controller.pause() }
+        }
+        Unit
     }
 
     @Test
@@ -144,6 +292,49 @@ class PlaybackControllerTest {
     }
 
     @Test
+    fun unsupportedOrAmbiguousPcmDescriptorsChooseExo() {
+        val formats = listOf(
+            AudioFormatDescriptor.pcmInteger(bitDepth = 16),
+            AudioFormatDescriptor.pcmInteger(bitDepth = 24, isSigned = false),
+            AudioFormatDescriptor.pcmInteger(bitDepth = 24, byteOrder = PcmByteOrder.BIG_ENDIAN),
+            AudioFormatDescriptor(
+                mimeType = "audio/raw",
+                pcmEncoding = PcmSampleEncoding.INTEGER,
+                bitDepth = 24,
+                isSigned = true,
+                byteOrder = PcmByteOrder.UNSPECIFIED
+            ),
+            AudioFormatDescriptor(mimeType = "audio/L24"),
+            AudioFormatDescriptor(
+                mimeType = "audio/L32",
+                pcmEncoding = PcmSampleEncoding.INTEGER,
+                bitDepth = 32,
+                isSigned = true
+            ),
+            AudioFormatDescriptor(
+                mimeType = "audio/aac",
+                pcmEncoding = PcmSampleEncoding.INTEGER,
+                bitDepth = 24,
+                isSigned = true,
+                byteOrder = PcmByteOrder.LITTLE_ENDIAN
+            ),
+            AudioFormatDescriptor.pcmFloat(bitDepth = 24),
+            AudioFormatDescriptor.pcmFloat(bitDepth = 64),
+            AudioFormatDescriptor(
+                mimeType = "audio/raw",
+                pcmEncoding = PcmSampleEncoding.FLOAT,
+                bitDepth = 32,
+                isSigned = false,
+                byteOrder = PcmByteOrder.LITTLE_ENDIAN
+            )
+        )
+
+        formats.forEach { format ->
+            assertEquals(format.toString(), EngineChoice.EXO, PcmCompatibilityPolicy.choose(format))
+        }
+    }
+
+    @Test
     fun aacAndOpusChooseExo() {
         listOf("audio/mp4a-latm", "audio/aac", "audio/opus").forEach { mimeType ->
             assertEquals(
@@ -156,7 +347,7 @@ class PlaybackControllerTest {
     private fun controller(factory: FakeEngineFactory): PlaybackController =
         PlaybackController(
             engineFactory = factory,
-            scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         )
 
     private fun session(
@@ -177,6 +368,8 @@ class PlaybackControllerTest {
 
     private class FakeEngineFactory : PlayerEngineFactory {
         private val engines = mutableListOf<FakeEngine>()
+        private val nextLoadFailures = mutableMapOf<EngineChoice, Throwable>()
+        private val nextReleaseFailures = mutableMapOf<EngineChoice, Throwable>()
         var maxActiveCount = 0
             private set
 
@@ -185,9 +378,16 @@ class PlaybackControllerTest {
 
         override fun create(choice: EngineChoice): PlayerEngine = FakeEngine(choice) {
             maxActiveCount = maxOf(maxActiveCount, activeCount)
-        }.also { engines += it }
+        }.also {
+            it.loadFailure = nextLoadFailures.remove(choice)
+            it.releaseFailure = nextReleaseFailures.remove(choice)
+            engines += it
+        }
 
         fun single(choice: EngineChoice): FakeEngine = engines.single { it.choice == choice }
+        fun all(choice: EngineChoice): List<FakeEngine> = engines.filter { it.choice == choice }
+        fun failNextLoad(choice: EngineChoice, error: Throwable) { nextLoadFailures[choice] = error }
+        fun failNextRelease(choice: EngineChoice, error: Throwable) { nextReleaseFailures[choice] = error }
     }
 
     private class FakeEngine(
@@ -201,9 +401,13 @@ class PlaybackControllerTest {
         var loadedGeneration = 0L
         var loadedSession: PlaybackSession? = null
         var snapshot = PlaybackSnapshot()
+        var loadFailure: Throwable? = null
+        var releaseFailure: Throwable? = null
         var activeLoads = 0
             private set
-        var releaseCount = 0
+        var releaseAttempts = 0
+            private set
+        var successfulReleases = 0
             private set
 
         override fun setListener(listener: PlayerEngine.Listener?) {
@@ -216,6 +420,10 @@ class PlaybackControllerTest {
             activeLoads = 1
             calls += "load:${session.mediaUri}"
             onActiveCountChanged()
+            loadFailure?.let {
+                loadFailure = null
+                throw it
+            }
         }
 
         override suspend fun play() {
@@ -247,14 +455,30 @@ class PlaybackControllerTest {
         override suspend fun snapshot(): PlaybackSnapshot = snapshot
 
         override suspend fun release() {
-            releaseCount++
-            activeLoads = 0
+            releaseAttempts++
             calls += "release"
+            releaseFailure?.let {
+                releaseFailure = null
+                throw it
+            }
+            activeLoads = 0
+            successfulReleases++
             onActiveCountChanged()
         }
 
         fun emit(generation: Long, event: EngineEvent) {
             eventListener?.onEvent(generation, event)
         }
+    }
+
+    private suspend inline fun <reified T : Throwable> assertFails(
+        crossinline block: suspend () -> Unit
+    ): T = try {
+        block()
+        fail("Expected ${T::class.java.simpleName}")
+        throw AssertionError("unreachable")
+    } catch (error: Throwable) {
+        if (error !is T) throw error
+        error
     }
 }

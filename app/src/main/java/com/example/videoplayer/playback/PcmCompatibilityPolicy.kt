@@ -8,6 +8,7 @@ enum class PcmSampleEncoding {
 }
 
 enum class PcmByteOrder {
+    UNSPECIFIED,
     LITTLE_ENDIAN,
     BIG_ENDIAN
 }
@@ -16,8 +17,8 @@ data class AudioFormatDescriptor(
     val mimeType: String?,
     val pcmEncoding: PcmSampleEncoding? = null,
     val bitDepth: Int? = null,
-    val isSigned: Boolean = true,
-    val byteOrder: PcmByteOrder = PcmByteOrder.LITTLE_ENDIAN
+    val isSigned: Boolean? = null,
+    val byteOrder: PcmByteOrder = PcmByteOrder.UNSPECIFIED
 ) {
     companion object {
         fun pcmInteger(
@@ -39,6 +40,7 @@ data class AudioFormatDescriptor(
             mimeType = "audio/raw",
             pcmEncoding = PcmSampleEncoding.FLOAT,
             bitDepth = bitDepth,
+            isSigned = true,
             byteOrder = byteOrder
         )
     }
@@ -46,25 +48,26 @@ data class AudioFormatDescriptor(
 
 object PcmCompatibilityPolicy {
     fun choose(format: AudioFormatDescriptor): EngineChoice {
-        if (!format.isPcm() || format.byteOrder != PcmByteOrder.LITTLE_ENDIAN) {
+        if (!format.isConsistentPcmDescriptor()) {
             return EngineChoice.EXO
         }
         val needsVlc = when (format.pcmEncoding) {
-            PcmSampleEncoding.FLOAT -> true
-            PcmSampleEncoding.INTEGER -> format.isSigned && format.bitDepth in setOf(24, 32)
+            PcmSampleEncoding.FLOAT -> format.bitDepth == 32
+            PcmSampleEncoding.INTEGER -> format.bitDepth == 24 || format.bitDepth == 32
             null -> false
         }
         return if (needsVlc) EngineChoice.VLC else EngineChoice.EXO
     }
 
-    private fun AudioFormatDescriptor.isPcm(): Boolean {
+    private fun AudioFormatDescriptor.isConsistentPcmDescriptor(): Boolean {
         val normalizedMimeType = mimeType?.lowercase(Locale.ROOT)
-        return pcmEncoding != null && normalizedMimeType in setOf(
+        return pcmEncoding != null &&
+            isSigned == true &&
+            byteOrder == PcmByteOrder.LITTLE_ENDIAN &&
+            normalizedMimeType in setOf(
             "audio/raw",
             "audio/pcm",
-            "audio/x-pcm",
-            "audio/l24",
-            "audio/l32"
+            "audio/x-pcm"
         )
     }
 }
