@@ -20,3 +20,6 @@ local.properties
 /screen*.png
 /screenshot.png
 /window_*.xml
+
+# Local isolated development worktrees
+/.worktrees/
