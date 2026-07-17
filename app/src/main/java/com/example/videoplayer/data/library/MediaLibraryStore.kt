@@ -1,145 +1,185 @@
 package com.example.videoplayer.data.library
 
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 
 class MediaLibraryStore(
     private val scanner: MediaLibraryScanner,
-    private val requestScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 ) {
-    private val refreshMutex = Mutex()
-    private val generation = AtomicLong(0L)
+    private val commands = Channel<Command>(Channel.UNLIMITED)
     private val _state = MutableStateFlow(MediaLibraryState())
-    private var activeNonForcedRefresh: RefreshRequest? = null
-    private var activeForcedRefresh: RefreshRequest? = null
 
     val state: StateFlow<MediaLibraryState> = _state.asStateFlow()
 
+    init {
+        scope.launch { processCommands() }
+    }
+
     suspend fun refresh(force: Boolean) {
-        val selection = selectRequest(force)
-        if (selection is RequestSelection.WaitForNormalLane) {
-            selection.request.finished.await()
-            refresh(force)
-            return
-        }
-
-        val request = selection.request
-        if (selection.startsScan) {
-            request.job.start()
-        }
-
+        val completion = CompletableDeferred<Unit>()
+        commands.send(Command.Refresh(force, completion))
         try {
-            publishIfCurrent(request)
+            completion.await()
         } catch (error: CancellationException) {
-            if (selection.startsScan) {
-                request.job.cancel(error)
-                withContext(NonCancellable) {
-                    request.finished.await()
-                }
-            }
+            commands.trySend(Command.CallerCancelled(completion))
             throw error
         }
     }
 
-    private suspend fun selectRequest(force: Boolean): RequestSelection = refreshMutex.withLock {
-        val currentGeneration = generation.get()
-        if (!force) {
-            activeForcedRefresh
-                ?.takeIf { it.generation == currentGeneration }
-                ?.let { return@withLock RequestSelection.Reuse(it) }
-            activeNonForcedRefresh
-                ?.takeIf { it.generation == currentGeneration }
-                ?.let { return@withLock RequestSelection.Reuse(it) }
-            activeNonForcedRefresh?.let { return@withLock RequestSelection.WaitForNormalLane(it) }
+    private suspend fun processCommands() {
+        var generation = 0L
+        var active: ActiveScan? = null
+        var normalLane: ActiveScan? = null
+        var completedForced: CompletedForced? = null
+        val pendingNormalCallers = mutableListOf<CompletableDeferred<Unit>>()
+
+        fun beginScan(force: Boolean, callers: List<CompletableDeferred<Unit>>) {
+            generation++
+            val scan = startScan(generation, force, callers.first())
+            callers.drop(1).forEach { scan.callers += it }
+            active = scan
+            if (!force) normalLane = scan
+            _state.value = _state.value.copy(
+                generation = generation,
+                isRefreshing = true,
+                error = null
+            )
         }
 
-        val request = newRequest(force)
-        if (force) {
-            activeNonForcedRefresh?.takeIf { it.generation < request.generation }?.job?.cancel()
-            activeForcedRefresh = request
-        } else {
-            activeNonForcedRefresh = request
+        fun startPendingNormalIfPossible() {
+            if (active != null || normalLane != null || pendingNormalCallers.isEmpty()) return
+            val callers = pendingNormalCallers.toList()
+            pendingNormalCallers.clear()
+            beginScan(force = false, callers)
         }
-        _state.value = _state.value.copy(
-            generation = request.generation,
-            isRefreshing = true,
-            error = null
-        )
-        RequestSelection.Start(request)
+
+        for (command in commands) {
+            when (command) {
+                is Command.Refresh -> {
+                    val current = active
+                    when {
+                        !command.force && current != null -> {
+                            current.callers += command.completion
+                        }
+
+                        !command.force && completedForced != null && normalLane != null -> {
+                            command.completion.complete(Unit)
+                        }
+
+                        !command.force && normalLane != null -> {
+                            pendingNormalCallers += command.completion
+                        }
+
+                        else -> {
+                            if (command.force) {
+                                active?.let { superseded ->
+                                    superseded.job.cancel()
+                                    superseded.callers.forEach {
+                                        it.completeExceptionally(CancellationException("Superseded by a newer refresh"))
+                                    }
+                                    superseded.callers.clear()
+                                }
+                                normalLane?.takeIf { it !== active }?.job?.cancel()
+                                completedForced = null
+                            }
+                            beginScan(command.force, listOf(command.completion))
+                        }
+                    }
+                }
+
+                is Command.ScanResult -> {
+                    if (active?.generation == command.generation) {
+                        val completed = active ?: continue
+                        _state.value = command.result.toState(command.generation)
+                        completed.callers.forEach { it.complete(Unit) }
+                        completed.callers.clear()
+                        active = null
+                        if (completed.force && normalLane != null) {
+                            completedForced = CompletedForced(command.generation)
+                        }
+                        if (!completed.force && normalLane?.generation == command.generation) {
+                            normalLane = null
+                            completedForced = null
+                            startPendingNormalIfPossible()
+                        }
+                    } else if (normalLane?.generation == command.generation) {
+                        normalLane = null
+                        completedForced = null
+                        startPendingNormalIfPossible()
+                    }
+                }
+
+                is Command.ScanFailed -> {
+                    if (active?.generation == command.generation) {
+                        val failed = active ?: continue
+                        _state.value = MediaLibraryState(
+                            generation = command.generation,
+                            error = LibraryError.ScanFailure(command.error)
+                        )
+                        failed.callers.forEach { it.complete(Unit) }
+                        failed.callers.clear()
+                        active = null
+                        if (!failed.force && normalLane?.generation == command.generation) {
+                            normalLane = null
+                            completedForced = null
+                            startPendingNormalIfPossible()
+                        }
+                    } else if (normalLane?.generation == command.generation) {
+                        normalLane = null
+                        completedForced = null
+                        startPendingNormalIfPossible()
+                    }
+                }
+
+                is Command.ScanCancelled -> {
+                    if (active?.generation == command.generation) {
+                        active = null
+                        if (state.value.generation == command.generation) {
+                            _state.value = _state.value.copy(isRefreshing = false)
+                        }
+                    }
+                    if (normalLane?.generation == command.generation) {
+                        normalLane = null
+                        completedForced = null
+                        startPendingNormalIfPossible()
+                    }
+                }
+
+                is Command.CallerCancelled -> {
+                    active?.callers?.remove(command.completion)
+                    pendingNormalCallers.remove(command.completion)
+                }
+            }
+        }
     }
 
-    private fun newRequest(force: Boolean): RefreshRequest {
-        val request = RefreshRequest(generation.incrementAndGet(), force)
-        request.job = requestScope.launch(start = CoroutineStart.LAZY) {
-            runRequest(request)
-        }
-        return request
-    }
-
-    private suspend fun runRequest(request: RefreshRequest) {
-        try {
-            val outcome = try {
-                RefreshOutcome.ScanResult(scanner.scan(request.force))
-            } catch (error: CancellationException) {
-                throw error
+    private fun startScan(
+        generation: Long,
+        force: Boolean,
+        completion: CompletableDeferred<Unit>
+    ): ActiveScan {
+        lateinit var job: Job
+        val callers = linkedSetOf(completion)
+        job = scope.launch {
+            try {
+                commands.send(Command.ScanResult(generation, scanner.scan(force)))
+            } catch (_: CancellationException) {
+                commands.send(Command.ScanCancelled(generation))
             } catch (error: Throwable) {
-                RefreshOutcome.ScanFailure(error)
-            }
-            request.completion.complete(outcome)
-        } catch (error: CancellationException) {
-            request.completion.cancel(error)
-        } finally {
-            finishRequest(request)
-        }
-    }
-
-    private suspend fun finishRequest(request: RefreshRequest) {
-        refreshMutex.withLock {
-            if (activeNonForcedRefresh === request) {
-                activeNonForcedRefresh = null
-            }
-            if (activeForcedRefresh === request && (
-                    activeNonForcedRefresh == null || request.completion.isCancelled
-                )
-            ) {
-                activeForcedRefresh = null
-            }
-            if (activeNonForcedRefresh == null && activeForcedRefresh?.completion?.isCompleted == true) {
-                activeForcedRefresh = null
-            }
-            if (request.generation == generation.get() && request.completion.isCancelled) {
-                _state.value = _state.value.copy(isRefreshing = false)
-            }
-            request.finished.complete(Unit)
-        }
-    }
-
-    private suspend fun publishIfCurrent(request: RefreshRequest) {
-        val outcome = request.completion.await()
-        refreshMutex.withLock {
-            if (request.generation != generation.get()) return
-            _state.value = when (outcome) {
-                is RefreshOutcome.ScanResult -> outcome.result.toState(request.generation)
-                is RefreshOutcome.ScanFailure -> MediaLibraryState(
-                    generation = request.generation,
-                    error = LibraryError.ScanFailure(outcome.cause)
-                )
+                commands.send(Command.ScanFailed(generation, error))
             }
         }
+        return ActiveScan(generation, force, job, callers)
     }
 
     private fun MediaLibraryScanResult.toState(generation: Long): MediaLibraryState {
@@ -149,11 +189,8 @@ class MediaLibraryStore(
             generation = generation,
             videos = videos.itemsOrEmpty(),
             photos = photos.itemsOrEmpty(),
-            error = if (videoFailure == null && photoFailure == null) {
-                null
-            } else {
-                LibraryError.PartialQueryFailure(videoFailure, photoFailure)
-            }
+            error = if (videoFailure == null && photoFailure == null) null
+            else LibraryError.PartialQueryFailure(videoFailure, photoFailure)
         )
     }
 
@@ -162,34 +199,24 @@ class MediaLibraryStore(
         is MediaQueryResult.Failure -> emptyList()
     }
 
-    private sealed interface RequestSelection {
-        val request: RefreshRequest
-        val startsScan: Boolean
-
-        data class Start(override val request: RefreshRequest) : RequestSelection {
-            override val startsScan: Boolean = true
-        }
-
-        data class Reuse(override val request: RefreshRequest) : RequestSelection {
-            override val startsScan: Boolean = false
-        }
-
-        data class WaitForNormalLane(override val request: RefreshRequest) : RequestSelection {
-            override val startsScan: Boolean = false
-        }
-    }
-
-    private class RefreshRequest(
+    private data class ActiveScan(
         val generation: Long,
-        val force: Boolean
-    ) {
-        val completion = CompletableDeferred<RefreshOutcome>()
-        val finished = CompletableDeferred<Unit>()
-        lateinit var job: Job
-    }
+        val force: Boolean,
+        val job: Job,
+        val callers: MutableSet<CompletableDeferred<Unit>>
+    )
 
-    private sealed interface RefreshOutcome {
-        data class ScanResult(val result: MediaLibraryScanResult) : RefreshOutcome
-        data class ScanFailure(val cause: Throwable) : RefreshOutcome
+    private data class CompletedForced(val generation: Long)
+
+    private sealed interface Command {
+        data class Refresh(
+            val force: Boolean,
+            val completion: CompletableDeferred<Unit>
+        ) : Command
+
+        data class ScanResult(val generation: Long, val result: MediaLibraryScanResult) : Command
+        data class ScanFailed(val generation: Long, val error: Throwable) : Command
+        data class ScanCancelled(val generation: Long) : Command
+        data class CallerCancelled(val completion: CompletableDeferred<Unit>) : Command
     }
 }

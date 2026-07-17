@@ -82,3 +82,23 @@ The normal Android Gradle unit-test task is still blocked before test execution 
 - Each refresh request now owns a lazy coroutine job. Starting forced B cancels stale ordinary A, while C waits for A's `finished` signal outside the mutex before it can create a new ordinary request.
 - The completed-B reuse test retains a cancellation-resistant A until explicit completion, proving that C still reuses completed forced B while the stale ordinary lane is being cleared.
 - GREEN command: standalone Kotlin 1.9.22 compile plus JUnit 4.13.2 invocation for `MediaLibraryStoreTest`; output: `OK (9 tests)`.
+
+## Architecture rewrite: single actor command loop
+
+### Decision
+
+The mutex and request-owned-job coordinator was removed. `MediaLibraryStore` now owns one unlimited command channel and one actor loop. The actor is the only code that advances generation, chooses an active scan, updates `StateFlow`, starts pending ordinary work, and completes or removes caller completions. Scan jobs only send `ScanResult`, `ScanFailed`, or `ScanCancelled` commands.
+
+### Semantics
+
+- A forced refresh cancels the prior active scan and immediately starts a newer generation. It also cancels an older ordinary lane that is still clearing.
+- An ordinary refresh reuses the active scan, with a forced scan naturally taking priority. While an old ordinary scan is clearing, a completed forced result serves ordinary callers; otherwise ordinary callers are queued until that lane clears. This keeps at most one `force=false` scanner call active.
+- Cancelling a caller removes only its completion from actor bookkeeping. It does not cancel the shared scan; a later caller can still reuse and receive that scan's result.
+- No cleanup path needs a cancelled job to acquire a mutex, because no mutex coordinates store state.
+
+### Tests and verification
+
+- Migrated the existing scenarios to an `Unconfined` actor test harness and added `cancellationDuringStaleCleanupDoesNotBlockActor`.
+- The pre-rewrite ordinary-lane regression remained RED under the old design (`expected:<1> but was:<2>` active ordinary scans).
+- GREEN command: standalone Kotlin 1.9.22 compilation of the pure library/test sources followed by JUnit 4.13.2 `MediaLibraryStoreTest`. Output: `OK (10 tests)`.
+- `git diff --check` completed without whitespace errors.
