@@ -40,6 +40,11 @@ interface PlayerEngine {
 
     suspend fun snapshot(): PlaybackSnapshot
 
+    /**
+     * Releases all engine resources. A successful call must be idempotent; the controller will
+     * never call it again after success. If this call throws or is cancelled, resources are
+     * considered quarantined and the controller may retry release without issuing other commands.
+     */
     suspend fun release()
 
     fun interface Listener {

@@ -5,12 +5,14 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class PlaybackControllerClosedException(
     message: String,
@@ -216,9 +218,10 @@ class PlaybackController(
             return checkNotNull(activeEngine) { "No active player engine" }
         }
 
-        for (command in commands) {
-            try {
-                when (command) {
+        try {
+            for (command in commands) {
+                try {
+                    when (command) {
                     is Command.Load -> {
                         currentSession = command.session
                         if (activeEngine != null && !hasUsableEngine) {
@@ -363,15 +366,33 @@ class PlaybackController(
                             }
                         }
                     }
+                    }
+                } catch (error: CancellationException) {
+                    command.completion?.completeExceptionally(error)
+                    throw error
+                } catch (error: Throwable) {
+                    if (_state.value.error !== error) {
+                        _state.value = _state.value.copy(error = error)
+                    }
+                    command.completion?.completeExceptionally(error)
                 }
-            } catch (error: CancellationException) {
-                command.completion?.completeExceptionally(error)
-                throw error
-            } catch (error: Throwable) {
-                if (_state.value.error !== error) {
-                    _state.value = _state.value.copy(error = error)
+            }
+        } finally {
+            withContext(NonCancellable) {
+                val engine = activeEngine
+                if (engine != null) {
+                    hasUsableEngine = false
+                    acceptedGeneration = null
+                    val priorError = _state.value.error
+                    publish(priorError)
+                    try {
+                        engine.release()
+                        activeEngine = null
+                        publish(priorError)
+                    } catch (releaseError: Throwable) {
+                        publish(releaseError)
+                    }
                 }
-                command.completion?.completeExceptionally(error)
             }
         }
     }

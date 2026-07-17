@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -260,6 +261,57 @@ class PlaybackControllerTest {
     }
 
     @Test
+    fun cancellingOwnerScopeReleasesActiveEngineBeforeActorCloses() = runBlocking {
+        val factory = FakeEngineFactory()
+        val owner = SupervisorJob()
+        val controller = controller(
+            factory,
+            CoroutineScope(owner + Dispatchers.Default)
+        )
+        controller.load(session("video"))
+        val engine = factory.single(EngineChoice.EXO)
+
+        owner.cancelAndJoin()
+
+        assertEquals(1, engine.releaseAttempts)
+        assertEquals(1, engine.successfulReleases)
+        assertEquals(0, factory.activeCount)
+        assertNull(controller.state.value.engineChoice)
+        assertFalse(controller.state.value.hasUsableEngine)
+        assertFails<PlaybackControllerClosedException> {
+            withTimeout(1_000) { controller.play() }
+        }
+        Unit
+    }
+
+    @Test
+    fun cancellationReleaseFailureQuarantinesEngineAndDrainsCommands() = runBlocking {
+        val factory = FakeEngineFactory()
+        val owner = SupervisorJob()
+        val controller = controller(
+            factory,
+            CoroutineScope(owner + Dispatchers.Default)
+        )
+        controller.load(session("video"))
+        val engine = factory.single(EngineChoice.EXO)
+        val releaseFailure = IllegalStateException("cancel cleanup failed")
+        engine.releaseFailure = releaseFailure
+
+        owner.cancelAndJoin()
+
+        assertEquals(1, engine.releaseAttempts)
+        assertEquals(0, engine.successfulReleases)
+        assertEquals(1, factory.activeCount)
+        assertEquals(EngineChoice.EXO, controller.state.value.engineChoice)
+        assertFalse(controller.state.value.hasUsableEngine)
+        assertSame(releaseFailure, controller.state.value.error)
+        assertFails<PlaybackControllerClosedException> {
+            withTimeout(1_000) { controller.load(session("other")) }
+        }
+        assertEquals(1, factory.all(EngineChoice.EXO).size)
+    }
+
+    @Test
     fun loadPlayPauseSeekAndAudioSelectionPublishState() = runBlocking {
         val factory = FakeEngineFactory()
         val controller = controller(factory)
@@ -344,10 +396,13 @@ class PlaybackControllerTest {
         }
     }
 
-    private fun controller(factory: FakeEngineFactory): PlaybackController =
+    private fun controller(
+        factory: FakeEngineFactory,
+        scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    ): PlaybackController =
         PlaybackController(
             engineFactory = factory,
-            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            scope = scope
         )
 
     private fun session(
