@@ -143,10 +143,15 @@ class MediaLibraryStore(
 
                 is Command.ScanCancelled -> {
                     if (active?.generation == command.generation) {
+                        val cancelled = active ?: continue
                         active = null
                         if (state.value.generation == command.generation) {
                             _state.value = _state.value.copy(isRefreshing = false)
                         }
+                        cancelled.callers.forEach {
+                            it.completeExceptionally(CancellationException("Media scan cancelled"))
+                        }
+                        cancelled.callers.clear()
                     }
                     if (normalLane?.generation == command.generation) {
                         normalLane = null

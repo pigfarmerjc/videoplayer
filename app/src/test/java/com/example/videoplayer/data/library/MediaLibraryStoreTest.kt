@@ -9,6 +9,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.NonCancellable
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -169,6 +170,25 @@ class MediaLibraryStoreTest {
     }
 
     @Test
+    fun scannerCancellationCancelsEveryWaitingCaller() = runBlocking {
+        val scanner = DeferredScanner()
+        val store = store(scanner)
+        val first = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(false) }
+        scanner.started(0).await()
+        val second = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(false) }
+
+        scanner.cancel(0)
+        withTimeout(1_000) {
+            first.join()
+            second.join()
+        }
+
+        assertTrue(first.isCancelled)
+        assertTrue(second.isCancelled)
+        assertFalse(store.state.value.isRefreshing)
+    }
+
+    @Test
     fun cancellationDuringStaleCleanupDoesNotBlockActor() = runBlocking {
         val scanner = DeferredScanner().apply { ignoreCancellationFor(0) }
         val store = store(scanner)
@@ -224,6 +244,7 @@ class MediaLibraryStoreTest {
         fun started(index: Int): CompletableDeferred<Unit> = started[index]
         fun complete(index: Int, result: MediaLibraryScanResult) { results[index].complete(result) }
         fun fail(index: Int, error: Throwable) { results[index].completeExceptionally(error) }
+        fun cancel(index: Int) { results[index].cancel() }
         fun ignoreCancellationFor(index: Int) { nonCancellableCalls += index }
     }
 }

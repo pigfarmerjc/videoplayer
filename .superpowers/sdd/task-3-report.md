@@ -65,6 +65,13 @@ Implementation: `3a09a8f refactor: centralize media library state`.
 - GREEN: compiling `MediaLibraryState.kt`, `MediaLibraryStore.kt`, and `MediaLibraryStoreTest.kt` with the repository's Kotlin 1.9.22 compiler dependencies, then invoking JUnit 4.13.2, completed with `OK (8 tests)`.
 - `git diff --check` completed without whitespace errors.
 
+## Actor cancellation completion fix
+
+- Added `scannerCancellationCancelsEveryWaitingCaller`, with two ordinary callers sharing a scanner that actively throws `CancellationException`.
+- RED command: standalone Kotlin 1.9.22 compilation followed by JUnit 4.13.2 `MediaLibraryStoreTest`. Output: `Tests run: 11, Failures: 1` with `Timed out waiting for 1000 ms`, proving active caller completions were left pending.
+- `ScanCancelled` now captures the active request's remaining caller completions, clears actor active/state bookkeeping, and completes each remaining caller with `CancellationException`. A caller that cancelled itself has already been removed by `CallerCancelled` and is not completed twice.
+- GREEN command: the same standalone compiler/JUnit command. Output: `OK (11 tests)`.
+
 ### Remaining limitation
 
 The normal Android Gradle unit-test task is still blocked before test execution by the pre-existing `VideoPlayerScreen.kt` errors at lines 4538 and 4620. The standalone compile-and-run evidence above verifies the pure store and its tests without that unrelated source file; repository adaptation was source-reviewed because the blocked Android compilation cannot reach it.
