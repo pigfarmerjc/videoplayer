@@ -54,6 +54,7 @@ fun <T : VideoTimelineItem> deriveContinueWatching(
             null
         }
     }
+    .take(5)
 
 fun GalleryColumnStore.readClampedColumnCount(): Int {
     val storedColumnCount = read()

@@ -115,6 +115,20 @@ class VideoTimelineTest {
         assertEquals(8, commitGalleryColumnCount(previewColumns = 9.1f))
     }
 
+    @Test
+    fun continueWatchingIsLimitedToFiveNewestVideos() {
+        val videos = (1..6).map { index ->
+            TimelineVideo(id = "video-$index", dateAddedEpochSeconds = index.toLong())
+        }
+
+        val result = deriveContinueWatching(
+            videos = videos,
+            playbackProgress = videos.associate { it.id to 0.5f }
+        )
+
+        assertEquals(listOf("video-6", "video-5", "video-4", "video-3", "video-2"), result.map { it.video.id })
+    }
+
     private fun video(id: String, year: Int, month: Int, day: Int, hour: Int, minute: Int) =
         TimelineVideo(id, instant(year, month, day, hour, minute).epochSecond)
 

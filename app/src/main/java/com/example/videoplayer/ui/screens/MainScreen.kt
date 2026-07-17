@@ -2,98 +2,87 @@ package com.example.videoplayer.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items as gridItems
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Sort
-import androidx.compose.material.icons.automirrored.filled.ViewList
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Collections
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.PlayCircleOutline
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import coil.compose.AsyncImage
-import com.example.videoplayer.data.model.MediaFolder
+import com.example.videoplayer.data.library.LibraryMedia
+import com.example.videoplayer.data.library.MediaLibraryStore
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.data.repository.MediaRepository
-import com.example.videoplayer.data.model.LayoutMode
-import com.example.videoplayer.ui.components.MediaGalleryTile
-import androidx.compose.material.icons.filled.Collections
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.ui.input.pointer.pointerInput
-import com.example.videoplayer.ui.components.FolderCard
-import com.example.videoplayer.ui.components.FolderGridTile
-import com.example.videoplayer.ui.components.GlassmorphicCard
-import com.example.videoplayer.ui.components.AppBackground
-import com.example.videoplayer.ui.components.MediaGridTile
-import com.example.videoplayer.ui.components.MediaItemCard
-import com.example.videoplayer.ui.components.mediaPreviewRequest
-import com.example.videoplayer.ui.components.bounceClick
-import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
-import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
-import com.example.videoplayer.ui.theme.*
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import com.example.videoplayer.ui.gallery.VideoGalleryScreen
+import com.example.videoplayer.ui.gallery.GalleryColumnStore
+import com.example.videoplayer.ui.gallery.readClampedColumnCount
+import com.example.videoplayer.ui.photos.PhotoGalleryScreen
+import com.example.videoplayer.ui.theme.GalleryBackground
+import com.example.videoplayer.ui.theme.GalleryIceBlue
+import com.example.videoplayer.ui.theme.GalleryRaisedSurface
+import com.example.videoplayer.ui.theme.GallerySurface
+import com.example.videoplayer.ui.theme.GalleryText
+import com.example.videoplayer.ui.theme.GalleryTextMuted
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.foundation.Canvas
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.withTransform
+
+enum class GalleryDestination {
+    VIDEOS,
+    PHOTOS,
+    LIBRARY
+}
 
 @Composable
 fun MainScreen(
@@ -108,1003 +97,364 @@ fun MainScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var hasPermission by remember { mutableStateOf(false) }
-    var isStartupLoading by remember { mutableStateOf(!repository.hasFreshMediaCache()) }
-    var isLoading by remember { mutableStateOf(false) }
-    var mediaItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var folders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
+    val store = remember(repository, scope) { MediaLibraryStore(repository, scope) }
+    val libraryState by store.state.collectAsState()
+    var hasVideoPermission by remember { mutableStateOf(hasVideoPermission(context)) }
+    var hasPhotoPermission by remember { mutableStateOf(hasPhotoPermission(context)) }
 
-    var sortMode by remember { mutableStateOf(SortMode.BY_TIME) }
-    var watchedLast by remember { mutableStateOf(repository.isWatchedLastEnabled()) }
-
-    // 网格/列表模式（文件夹、视频 Tab 独立保存）
-    var folderGridMode by remember { mutableStateOf(repository.isMainFolderGridModeEnabled()) }
-    var videoLayoutMode by remember { mutableStateOf(repository.getVideoLayoutMode()) }
-    var videoGalleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
-    // 视频网格尺寸档位: 140=小, 220=中, 320=大
-    var videoGridSizeDp by remember { mutableIntStateOf(repository.getVideoGridSize()) }
-    // 首次启动显示主界面功能教程
-    var showMainTutorial by remember { mutableStateOf(!repository.isMainTutorialShown()) }
-    var didInitialLoad by remember { mutableStateOf(false) }
-
-    // ── 增加生命周期监听与返回刷新 ──
-    val lifecycleOwner = LocalContext.current as? LifecycleOwner
-    var resumeTrigger by remember { mutableIntStateOf(0) }
-    DisposableEffect(lifecycleOwner) {
-        if (lifecycleOwner == null) {
-            onDispose { }
-        } else {
-            val observer = LifecycleEventObserver { _, event ->
-                if (event == Lifecycle.Event.ON_RESUME) {
-                    resumeTrigger++
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
+    val videoPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasVideoPermission = granted
+        if (granted) scope.launch { store.refresh(force = false) }
     }
-
-    val requiredPermissions = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(
-                Manifest.permission.READ_MEDIA_VIDEO,
-                Manifest.permission.READ_MEDIA_IMAGES
-            )
-        } else {
-            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
-    }
-
-    suspend fun reload(forceRefresh: Boolean = false) {
-        val showBlockingLoading = forceRefresh || (!didInitialLoad && !repository.hasFreshMediaCache())
-        if (showBlockingLoading) isLoading = true
-        try {
-            val items = repository.scanMedia(forceRefresh)
-            mediaItems = items
-            onMediaItemsLoaded(items)
-            didInitialLoad = true
-        } finally {
-            if (showBlockingLoading) isLoading = false
-        }
-    }
-
-    // 动态刷新 Folders
-    LaunchedEffect(mediaItems, resumeTrigger) {
-        if (hasPermission && mediaItems.isNotEmpty()) {
-            folders = repository.getFolders(mediaItems)
-        }
-    }
-
-    fun hasAllPermissions() = requiredPermissions.all {
-        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
-        hasPermission = results.values.all { it }
-        if (hasPermission) {
-            scope.launch {
-                val showStartupAnimation = !repository.hasFreshMediaCache()
-                isStartupLoading = showStartupAnimation
-                val delayJob = if (showStartupAnimation) launch { delay(1200) } else null
-                reload()
-                delayJob?.join()
-                isStartupLoading = false
-            }
-        } else {
-            isStartupLoading = false
-        }
+    val photoPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasPhotoPermission = granted
+        if (granted) scope.launch { store.refresh(force = true) }
     }
 
     LaunchedEffect(Unit) {
-        hasPermission = hasAllPermissions()
-        if (hasPermission) {
-            scope.launch {
-                val showStartupAnimation = !repository.hasFreshMediaCache()
-                isStartupLoading = showStartupAnimation
-                val delayJob = if (showStartupAnimation) launch { delay(1200) } else null
-                reload()
-                delayJob?.join()
-                isStartupLoading = false
-            }
+        if (hasVideoPermission) {
+            store.refresh(force = false)
         } else {
-            isStartupLoading = false
-            permissionLauncher.launch(requiredPermissions)
+            videoPermissionLauncher.launch(videoPermission())
         }
     }
 
-    fun toggleFavorite(item: MediaItem) {
-        repository.setFavorite(item, !repository.isFavorite(item))
-        scope.launch { folders = repository.getFolders(mediaItems) }
+    val videos = remember(libraryState.generation, libraryState.videos) {
+        libraryState.videos.map { it.toMediaItem(MediaType.VIDEO) }
     }
-
-    fun togglePlaylist(item: MediaItem) {
-        repository.setInPlaylist(item, !repository.isInPlaylist(item))
-        scope.launch { folders = repository.getFolders(mediaItems) }
+    val photos = remember(libraryState.generation, libraryState.photos) {
+        libraryState.photos.map { it.toMediaItem(MediaType.PHOTO) }
     }
-
-    // ── Offload filtering and sorting to background thread ──
-    var filteredFolders by remember { mutableStateOf<List<MediaFolder>>(emptyList()) }
-    var filteredVideos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var filteredPhotos by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-    var filteredFavorites by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-
-    LaunchedEffect(folders) {
-        filteredFolders = folders
-    }
-
-    LaunchedEffect(mediaItems, sortMode, watchedLast, resumeTrigger) {
-        val result = withContext(Dispatchers.Default) {
-            val watchedSet = if (watchedLast) repository.watchedKeySnapshot() else emptySet()
-            FilteredMedia(
-                videos = sortMedia(mediaItems.filter { it.type == MediaType.VIDEO }, sortMode, watchedLast, watchedSet),
-                photos = sortMedia(mediaItems.filter { it.type == MediaType.PHOTO }, sortMode, watchedLast, watchedSet),
-                favorites = sortMedia(repository.favoriteItems(mediaItems), sortMode, watchedLast, watchedSet)
-            )
-        }
-        filteredVideos = result.videos
-        filteredPhotos = result.photos
-        filteredFavorites = result.favorites
-    }
-
-    val progressItems = remember(selectedTab, filteredVideos, filteredFavorites) {
-        when (selectedTab) {
-            1 -> filteredVideos
-            3 -> filteredFavorites
-            else -> emptyList()
+    var playbackProgress by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
+    LaunchedEffect(videos) {
+        playbackProgress = withContext(Dispatchers.IO) {
+            repository.playbackProgressSnapshot(videos)
         }
     }
-    var progressSnapshot by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
-    LaunchedEffect(progressItems, resumeTrigger) {
-        // 防抖 500ms：快速切 Tab 时只在稳定后才触发 IO 读
-        delay(500)
-        withContext(Dispatchers.IO) {
-            progressSnapshot = repository.playbackProgressSnapshot(progressItems)
+    LaunchedEffect(videos, photos) {
+        onMediaItemsLoaded(videos + photos)
+    }
+
+    val columnStore = remember(repository) {
+        object : GalleryColumnStore {
+            override fun read(): Int = repository.getGalleryColumnCount()
+            override fun write(columnCount: Int) = repository.setGalleryColumnCount(columnCount)
         }
     }
-    val favoriteKeys = remember(folders, mediaItems, resumeTrigger) { repository.favoriteKeySnapshot() }
-    val playlistKeys = remember(folders, mediaItems, resumeTrigger) { repository.playlistKeySnapshot() }
+    var columnCount by remember { mutableIntStateOf(columnStore.readClampedColumnCount()) }
 
-    Scaffold(
-        containerColor = CarbonBg
-    ) { paddingValues ->
-        AppBackground(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp)
-            ) {
-                Header(
-                    onRefresh = { if (hasPermission) scope.launch { reload(forceRefresh = true) } },
-                    onSettings = onNavigateToSettings
-                )
-                SortToolbar(
-                    sortMode = sortMode,
-                    onSortModeChange = { sortMode = it },
-                    watchedLast = watchedLast,
-                    onWatchedLastChange = {
-                        watchedLast = it
-                        repository.setWatchedLastEnabled(it)
-                    },
-                    // 仅文件夹/视频 Tab 显示网格切换按钮
-                    showLayoutToggle = selectedTab == 0 || selectedTab == 1,
-                    currentLayoutMode = when (selectedTab) {
-                        0 -> if (folderGridMode) LayoutMode.GRID else LayoutMode.LIST
-                        1 -> videoLayoutMode
-                        else -> LayoutMode.LIST
-                    },
-                    showSizeToggle = when (selectedTab) {
-                        1 -> videoLayoutMode == LayoutMode.GRID
-                        else -> false
-                    },
-                    currentGridSizeDp = videoGridSizeDp,
-                    onGridSizeChange = { size ->
-                        videoGridSizeDp = size
-                        repository.setVideoGridSize(size)
-                    },
-                    onLayoutModeToggle = {
-                        when (selectedTab) {
-                            0 -> {
-                                folderGridMode = !folderGridMode
-                                repository.setMainFolderGridModeEnabled(folderGridMode)
-                            }
-                            1 -> {
-                                videoLayoutMode = when (videoLayoutMode) {
-                                    LayoutMode.LIST -> LayoutMode.GRID
-                                    LayoutMode.GRID -> LayoutMode.GALLERY
-                                    LayoutMode.GALLERY -> LayoutMode.LIST
-                                }
-                                repository.setVideoLayoutMode(videoLayoutMode)
-                            }
-                        }
-                    }
-                )
-                Spacer(modifier = Modifier.height(12.dp))
+    if (!hasVideoPermission) {
+        PermissionScreen(
+            title = "允许访问视频",
+            message = "需要读取本机视频，才能建立时间画廊。",
+            onGrant = { videoPermissionLauncher.launch(videoPermission()) }
+        )
+        return
+    }
 
-                when {
-                    !hasPermission -> PermissionView { permissionLauncher.launch(requiredPermissions) }
-                    isStartupLoading || isLoading -> Box(
-                        modifier = Modifier.fillMaxSize().background(CarbonBg),
-                    ) {
-                        BlackCatLoader(
-                            labelText = if (isStartupLoading) "正在启动黑猫播放器..." else "正在刷新媒体库..."
-                        )
-                    }
-                    else -> Box(Modifier.weight(1f)) {
-                        when (selectedTab) {
-                            0 -> if (folderGridMode) {
-                                FolderGridView(filteredFolders, onNavigateToFolder)
-                            } else {
-                                FolderList(filteredFolders, onNavigateToFolder)
-                            }
-                            1 -> when (videoLayoutMode) {
-                                LayoutMode.LIST -> {
-                                    MediaList(filteredVideos, MediaRepository.ALL_VIDEOS, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
-                                }
-                                LayoutMode.GRID -> {
-                                    MediaGridView(
-                                        items = filteredVideos,
-                                        folderName = MediaRepository.ALL_VIDEOS,
-                                        progressSnapshot = progressSnapshot,
-                                        repository = repository,
-                                        gridSizeDp = videoGridSizeDp,
-                                        onNavigateToVideo = onNavigateToVideo,
-                                        onNavigateToPhoto = onNavigateToPhoto
-                                    )
-                                }
-                                LayoutMode.GALLERY -> {
-                                    MediaGalleryView(
-                                        items = filteredVideos,
-                                        folderName = MediaRepository.ALL_VIDEOS,
-                                        progressSnapshot = progressSnapshot,
-                                        columnsCount = videoGalleryColumns,
-                                        onColumnsChange = { cols ->
-                                            videoGalleryColumns = cols
-                                            repository.setGalleryColumnCount(cols)
-                                        },
-                                        onNavigateToVideo = onNavigateToVideo,
-                                        onNavigateToPhoto = onNavigateToPhoto
-                                    )
-                                }
-                            }
-                            2 -> PhotoGrid(filteredPhotos, onNavigateToPhoto)
-                            3 -> MediaList(filteredFavorites, MediaRepository.FAVORITES, favoriteKeys, playlistKeys, progressSnapshot, repository, ::toggleFavorite, ::togglePlaylist, onNavigateToVideo, onNavigateToPhoto)
-                        }
-                    }
-                }
+    MainGalleryContent(
+        videos = videos,
+        photos = photos,
+        playbackProgress = playbackProgress,
+        initialColumns = columnCount,
+        onColumnsChange = { requested ->
+            columnCount = requested.coerceIn(2, 8)
+            columnStore.write(columnCount)
+        },
+        onNavigateToVideo = onNavigateToVideo,
+        onNavigateToPhoto = onNavigateToPhoto,
+        onNavigateToLibrary = {},
+        onRefresh = { scope.launch { store.refresh(force = true) } },
+        initialDestination = GalleryDestination.entries.getOrElse(selectedTab) {
+            GalleryDestination.VIDEOS
+        },
+        onDestinationChange = { destination ->
+            onSelectedTabChange(destination.ordinal)
+            if (destination == GalleryDestination.PHOTOS && !hasPhotoPermission) {
+                photoPermissionLauncher.launch(photoPermission())
             }
-
-            GlassmorphicBottomNavBar(
-                selectedTab = selectedTab,
-                onTabSelected = onSelectedTabChange,
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
-
-            // 首次启动主界面功能教程
-            com.example.videoplayer.ui.components.MainTutorialOverlay(
-                visible = showMainTutorial,
-                onDismiss = {
-                    showMainTutorial = false
-                    repository.setMainTutorialShown(true)
-                }
-            )
-        }
-    }
-}
-
-@Composable
-private fun Header(onRefresh: () -> Unit, onSettings: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 22.dp, bottom = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column {
-            val titleGradient = Brush.linearGradient(
-                colors = listOf(PrimaryNeonPurple, SecondaryNeonCyan)
-            )
-            Text(
-                text = "黑猫播放器",
-                style = TextStyle(
-                    brush = titleGradient,
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            )
-            Text("4K 本地多媒体播放器", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-        }
-        Row {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.08f))
-                    .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
-                    .bounceClick { onRefresh() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "Refresh",
-                    tint = SecondaryNeonCyan,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.08f))
-                    .border(0.5.dp, Color.White.copy(alpha = 0.15f), CircleShape)
-                    .bounceClick { onSettings() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White, modifier = Modifier.size(20.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun SortToolbar(
-    sortMode: SortMode,
-    onSortModeChange: (SortMode) -> Unit,
-    watchedLast: Boolean,
-    onWatchedLastChange: (Boolean) -> Unit,
-    showLayoutToggle: Boolean = false,
-    currentLayoutMode: LayoutMode = LayoutMode.LIST,
-    onLayoutModeToggle: () -> Unit = {},
-    showSizeToggle: Boolean = false,
-    currentGridSizeDp: Int = 220,
-    onGridSizeChange: (Int) -> Unit = {}
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 8.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color.White.copy(alpha = 0.05f))
-                    .border(0.5.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(10.dp))
-                    .bounceClick { expanded = true }
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Sort, 
-                        contentDescription = null, 
-                        tint = Color.White, 
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(sortMode.label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                }
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                SortMode.entries.forEach { mode ->
-                    DropdownMenuItem(
-                        text = { Text(mode.label) },
-                        onClick = {
-                            onSortModeChange(mode)
-                            expanded = false
-                        }
-                    )
-                }
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (showLayoutToggle) {
-                if (showSizeToggle) {
-                    val sizes = listOf(140 to "S", 220 to "M", 320 to "L")
-                    sizes.forEach { (size, label) ->
-                        val isActive = currentGridSizeDp == size
-                        Box(
-                            modifier = Modifier
-                                .padding(end = 3.dp)
-                                .size(26.dp)
-                                .background(
-                                    if (isActive) SecondaryNeonCyan.copy(alpha = 0.22f) else Color.Transparent,
-                                    RoundedCornerShape(5.dp)
-                                )
-                                .border(
-                                    0.5.dp,
-                                    if (isActive) SecondaryNeonCyan else Color.White.copy(alpha = 0.3f),
-                                    RoundedCornerShape(5.dp)
-                                )
-                                .bounceClick { onGridSizeChange(size) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = label,
-                                color = if (isActive) SecondaryNeonCyan else TextSecondary,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                    Spacer(Modifier.width(4.dp))
-                }
-                val isNotList = currentLayoutMode != LayoutMode.LIST
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (isNotList) SecondaryNeonCyan.copy(alpha = 0.22f) else Color.Transparent)
-                        .bounceClick { onLayoutModeToggle() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = when (currentLayoutMode) {
-                            LayoutMode.LIST -> Icons.Default.GridView
-                            LayoutMode.GRID -> Icons.Default.Collections
-                            LayoutMode.GALLERY -> Icons.AutoMirrored.Filled.ViewList
-                        },
-                        contentDescription = "切换布局模式",
-                        tint = if (isNotList) SecondaryNeonCyan else TextSecondary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                Spacer(Modifier.width(6.dp))
-            }
-            Text("Watched Last", color = TextSecondary, fontSize = 12.sp)
-            Spacer(Modifier.width(6.dp))
-            Switch(checked = watchedLast, onCheckedChange = onWatchedLastChange)
-        }
-    }
-}
-
-@Composable
-private fun FolderList(folders: List<MediaFolder>, onNavigateToFolder: (String) -> Unit) {
-    if (folders.isEmpty()) {
-        EmptyStateView("No folders found")
-    } else {
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 96.dp)) {
-            items(
-                folders,
-                key = { "${it.name}-${it.path}" },
-                contentType = { "folder" }
-            ) { folder -> FolderCard(folder = folder, onClick = { onNavigateToFolder(folder.name) }) }
-        }
-    }
-}
-
-@Composable
-private fun FolderGridView(folders: List<MediaFolder>, onNavigateToFolder: (String) -> Unit) {
-    if (folders.isEmpty()) {
-        EmptyStateView("No folders found")
-    } else {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(148.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp)
-        ) {
-            gridItems(
-                folders,
-                key = { "${it.name}-${it.path}" },
-                contentType = { "folder" }
-            ) { folder ->
-                FolderGridTile(folder = folder, onClick = { onNavigateToFolder(folder.name) })
-            }
-        }
-    }
-}
-
-@Composable
-private fun MediaList(
-    items: List<MediaItem>,
-    folderName: String,
-    favoriteKeys: Set<String>,
-    playlistKeys: Set<String>,
-    progressSnapshot: Map<String, Float>,
-    repository: MediaRepository,
-    onFavorite: (MediaItem) -> Unit,
-    onPlaylist: (MediaItem) -> Unit,
-    onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToPhoto: (Long, String) -> Unit
-) {
-    if (items.isEmpty()) {
-        EmptyStateView("No media items found")
-    } else {
-        val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
-        val listState = rememberLazyListState()
-        val thumbnailScrollController = remember {
-            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
-        }
-        LaunchedEffect(listState.isScrollInProgress) {
-            thumbnailScrollController.onScrollInProgressChanged(listState.isScrollInProgress)
-        }
-        LazyColumn(
-            state = listState,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            contentPadding = PaddingValues(bottom = 96.dp)
-        ) {
-            items(
-                items,
-                key = { it.storageKey },
-                contentType = { it.type }
-            ) { item ->
-                MediaItemCard(
-                    item = item,
-                    isFavorite = item.storageKey in favoriteKeys,
-                    isInPlaylist = item.storageKey in playlistKeys,
-                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
-                    isLastViewed = lastViewedKey == item.storageKey,
-                    onFavoriteClick = { onFavorite(item) },
-                    onPlaylistClick = { onPlaylist(item) },
-                    onClick = {
-                        when (item.type) {
-                            MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
-                            MediaType.AUDIO -> Unit
-                            MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
-                        }
-                    }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun MediaGridView(
-    items: List<MediaItem>,
-    folderName: String,
-    progressSnapshot: Map<String, Float>,
-    repository: MediaRepository,
-    gridSizeDp: Int = 220,
-    onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToPhoto: (Long, String) -> Unit
-) {
-    if (items.isEmpty()) {
-        EmptyStateView("No media items found")
-    } else {
-        val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
-        val gridState = rememberLazyGridState()
-        val thumbnailScrollController = remember {
-            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
-        }
-        LaunchedEffect(gridState.isScrollInProgress) {
-            thumbnailScrollController.onScrollInProgressChanged(gridState.isScrollInProgress)
-        }
-        LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Adaptive(gridSizeDp.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp)
-        ) {
-            gridItems(
-                items,
-                key = { it.storageKey },
-                contentType = { it.type }
-            ) { item ->
-                MediaGridTile(
-                    item = item,
-                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
-                    isLastViewed = lastViewedKey == item.storageKey,
-                    onClick = {
-                        when (item.type) {
-                            MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
-                            MediaType.AUDIO -> Unit
-                            MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
-                        }
-                    }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun PhotoGrid(items: List<MediaItem>, onNavigateToPhoto: (Long, String) -> Unit) {
-    if (items.isEmpty()) {
-        EmptyStateView("No photos found")
-    } else {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(112.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp)
-        ) {
-            gridItems(
-                items,
-                key = { it.storageKey },
-                contentType = { it.type }
-            ) { item ->
-                Box(
-                    modifier = Modifier
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF13151D))
-                        .clickable { onNavigateToPhoto(item.id, MediaRepository.ALL_PHOTOS) }
-                ) {
-                    AsyncImage(
-                        model = mediaPreviewRequest(item),
-                        contentDescription = item.title,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PermissionView(onGrantClick: () -> Unit) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
-            Icon(Icons.Default.Lock, contentDescription = null, tint = PrimaryNeonPurple, modifier = Modifier.size(64.dp))
-            Spacer(Modifier.height(14.dp))
-            Text("Media Permission Required", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text("The app needs media access to scan your local videos and images.", color = TextSecondary, fontSize = 13.sp, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(22.dp))
-            Button(onClick = onGrantClick, colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeonPurple), shape = RoundedCornerShape(10.dp)) {
-                Text("Grant Permission", color = Color.White, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-@Composable
-fun EmptyStateView(message: String) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Default.Info, contentDescription = null, tint = TextMuted, modifier = Modifier.size(44.dp))
-            Spacer(Modifier.height(8.dp))
-            Text(message, color = TextSecondary, fontSize = 14.sp)
-        }
-    }
-}
-
-@Composable
-fun GlassmorphicBottomNavBar(
-    selectedTab: Int, 
-    onTabSelected: (Int) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier
-            .padding(horizontal = 20.dp, vertical = 16.dp)
-            .fillMaxWidth()
-            .height(66.dp)
-            .shadow(
-                elevation = 12.dp,
-                shape = RoundedCornerShape(22.dp),
-                clip = false,
-                ambientColor = Color.Black,
-                spotColor = Color.Black
-            )
-            .clip(RoundedCornerShape(22.dp))
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xE60D1117),
-                        Color(0xCC070709)
-                    )
-                )
-            )
-            .border(
-                width = 1.dp,
-                brush = Brush.linearGradient(
-                    colors = listOf(
-                        CarbonBorder,
-                        Color(0x1F06B6D4),
-                        CarbonBorder.copy(alpha = 0.5f)
-                    )
-                ),
-                shape = RoundedCornerShape(22.dp)
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 10.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            NavBarItem(Icons.Default.Folder, "文件夹", selectedTab == 0) { onTabSelected(0) }
-            NavBarItem(Icons.Default.PlayCircle, "视频", selectedTab == 1) { onTabSelected(1) }
-            NavBarItem(Icons.Default.Image, "图片", selectedTab == 2) { onTabSelected(2) }
-            NavBarItem(Icons.Default.Star, "收藏", selectedTab == 3) { onTabSelected(3) }
-        }
-    }
-}
-
-@Composable
-fun NavBarItem(icon: ImageVector, label: String, isSelected: Boolean, onClick: () -> Unit) {
-    val selectionProgress by androidx.compose.animation.core.animateFloatAsState(
-        targetValue = if (isSelected) 1f else 0f,
-        animationSpec = tween(durationMillis = 220),
-        label = "navSelection"
+        },
+        onOpenLibrarySection = onNavigateToFolder,
+        onOpenSettings = onNavigateToSettings,
+        isRefreshing = libraryState.isRefreshing
     )
-    val tintColor = androidx.compose.ui.graphics.lerp(TextMuted, SecondaryNeonCyan, selectionProgress)
-    
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-        modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(SecondaryNeonCyan.copy(alpha = 0.16f * selectionProgress))
-            .graphicsLayer {
-                scaleX = 1f + 0.04f * selectionProgress
-                scaleY = 1f + 0.04f * selectionProgress
-            }
-            .bounceClick { onClick() }
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        Icon(
-            icon, 
-            contentDescription = label, 
-            tint = tintColor, 
-            modifier = Modifier.size(21.dp)
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            label, 
-            color = tintColor, 
-            fontSize = 9.sp, 
-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-        )
-    }
-}
-
-private enum class SortMode(val label: String) {
-    BY_TIME("Time"),
-    BY_NAME("Name"),
-    BY_SIZE("Size")
-}
-
-private data class FilteredMedia(
-    val videos: List<MediaItem>,
-    val photos: List<MediaItem>,
-    val favorites: List<MediaItem>
-)
-
-private fun sortMedia(
-    items: List<MediaItem>,
-    sortMode: SortMode,
-    watchedLast: Boolean,
-    watchedSet: Set<String>
-): List<MediaItem> {
-    val sorted = when (sortMode) {
-        SortMode.BY_TIME -> items.sortedByDescending { it.dateAdded }
-        SortMode.BY_NAME -> items.sortedBy { it.displayName.lowercase() }
-        SortMode.BY_SIZE -> items.sortedByDescending { it.size }
-    }
-    // 使用预计算的 watchedSet 快照，避免每个 item 读 SharedPreferences
-    return if (watchedLast) sorted.sortedBy { it.storageKey in watchedSet } else sorted
 }
 
 @Composable
-fun BlackCatLoader(
-    modifier: Modifier = Modifier,
-    labelText: String = "正在刷新媒体库..."
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "Spin")
-    val angle by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "RotationAngle"
-    )
-
-    Column(
-        modifier = modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Canvas(modifier = Modifier.size(64.dp)) {
-            val width = size.width
-            val height = size.height
-            val strokeWidth = 5f * (width / 64f)
-            
-            // Draw a background track (faint purple)
-            drawCircle(
-                color = Color(0x1A8B5CF6),
-                radius = (width - strokeWidth) / 2f,
-                center = Offset(width / 2f, height / 2f),
-                style = Stroke(width = strokeWidth)
-            )
-
-            // Draw a rotating gradient arc representing the spinning loader
-            withTransform({
-                rotate(degrees = angle, pivot = Offset(width / 2f, height / 2f))
-            }) {
-                drawArc(
-                    brush = Brush.sweepGradient(
-                        colors = listOf(
-                            Color(0x0000E5FF),
-                            Color(0xFF00E5FF),
-                            Color(0xFF8B5CF6),
-                            Color(0x008B5CF6)
-                        )
-                    ),
-                    startAngle = 0f,
-                    sweepAngle = 270f,
-                    useCenter = false,
-                    size = Size(width - strokeWidth, height - strokeWidth),
-                    topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f),
-                    style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
-                )
-            }
-        }
-
-        Spacer(Modifier.height(24.dp))
-
-        // Neon loading text
-        val titleGradient = Brush.linearGradient(
-            colors = listOf(PrimaryNeonPurple, SecondaryNeonCyan)
-        )
-        Text(
-            text = labelText,
-            style = TextStyle(
-                brush = titleGradient,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold
-            )
-        )
-    }
-}
-
-@Composable
-private fun AlienBlackCatIcon(
-    eyeColor: Color,
-    modifier: Modifier = Modifier
-) {
-    Canvas(modifier = modifier) {
-        val width = size.width
-        val height = size.height
-
-        val scaleX = width / 108f
-        val scaleY = height / 108f
-
-        // Draw outer ring glow (shadow)
-        drawCircle(
-            color = eyeColor.copy(alpha = 0.22f),
-            radius = 36f * scaleX,
-            center = Offset(54f * scaleX, 54f * scaleY),
-            style = Stroke(width = 8f * scaleX)
-        )
-
-        // Draw outer ring main line
-        drawCircle(
-            color = eyeColor,
-            radius = 36f * scaleX,
-            center = Offset(54f * scaleX, 54f * scaleY),
-            style = Stroke(width = 4f * scaleX)
-        )
-
-        // Draw central play triangle
-        val playPath = Path().apply {
-            moveTo(46f * scaleX, 36f * scaleY)
-            lineTo(72f * scaleX, 54f * scaleY)
-            lineTo(46f * scaleX, 72f * scaleY)
-            close()
-        }
-        drawPath(path = playPath, color = Color.White)
-    }
-}
-
-@Composable
-private fun MediaGalleryView(
-    items: List<MediaItem>,
-    folderName: String,
-    progressSnapshot: Map<String, Float>,
-    columnsCount: Int,
+fun MainGalleryContent(
+    videos: List<MediaItem>,
+    photos: List<MediaItem>,
+    playbackProgress: Map<String, Float>,
+    initialColumns: Int,
     onColumnsChange: (Int) -> Unit,
     onNavigateToVideo: (Long, String) -> Unit,
-    onNavigateToPhoto: (Long, String) -> Unit
+    onNavigateToPhoto: (Long, String) -> Unit,
+    onNavigateToLibrary: () -> Unit,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+    initialDestination: GalleryDestination = GalleryDestination.VIDEOS,
+    onDestinationChange: (GalleryDestination) -> Unit = {},
+    onOpenLibrarySection: (String) -> Unit = {},
+    onOpenSettings: () -> Unit = {},
+    isRefreshing: Boolean = false
 ) {
-    if (items.isEmpty()) {
-        EmptyStateView("暂无视频文件")
-    } else {
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(columnsCount),
-            verticalArrangement = Arrangement.spacedBy(1.5.dp),
-            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
-            contentPadding = PaddingValues(bottom = 96.dp, top = 4.dp),
-            modifier = Modifier.pinchToZoomColumns(
-                columns = columnsCount,
-                onColumnsChange = onColumnsChange
+    var destination by rememberSaveable { mutableStateOf(initialDestination) }
+
+    Scaffold(
+        containerColor = GalleryBackground,
+        topBar = {
+            GalleryTopBar(
+                destination = destination,
+                isRefreshing = isRefreshing,
+                onRefresh = onRefresh
             )
-        ) {
-            gridItems(
-                items,
-                key = { it.storageKey },
-                contentType = { it.type }
-            ) { item ->
-                MediaGalleryTile(
-                    item = item,
-                    progressFraction = progressSnapshot[item.storageKey] ?: 0f,
-                    onClick = {
-                        when (item.type) {
-                            MediaType.VIDEO -> onNavigateToVideo(item.id, folderName)
-                            MediaType.AUDIO -> Unit
-                            MediaType.PHOTO -> onNavigateToPhoto(item.id, folderName)
-                        }
-                    }
-                )
-            }
+        },
+        bottomBar = {
+            GalleryNavigationBar(
+                destination = destination,
+                onSelect = { selected ->
+                    destination = selected
+                    onDestinationChange(selected)
+                    if (selected == GalleryDestination.LIBRARY) onNavigateToLibrary()
+                }
+            )
+        },
+        modifier = modifier.fillMaxSize()
+    ) { padding ->
+        when (destination) {
+            GalleryDestination.VIDEOS -> VideoGalleryScreen(
+                videos = videos,
+                playbackProgress = playbackProgress,
+                columnCount = initialColumns,
+                onColumnsChange = onColumnsChange,
+                onNavigateToVideo = onNavigateToVideo,
+                modifier = Modifier.padding(padding)
+            )
+            GalleryDestination.PHOTOS -> PhotoGalleryScreen(
+                photos = photos,
+                onNavigateToPhoto = onNavigateToPhoto,
+                modifier = Modifier.padding(padding)
+            )
+            GalleryDestination.LIBRARY -> LibraryDestinationScreen(
+                onOpenSection = onOpenLibrarySection,
+                onOpenSettings = onOpenSettings,
+                modifier = Modifier.padding(padding)
+            )
         }
     }
 }
 
 @Composable
-fun Modifier.pinchToZoomColumns(
-    columns: Int,
-    onColumnsChange: (Int) -> Unit
-): Modifier {
-    val currentColumns by rememberUpdatedState(columns)
-    val currentOnChange by rememberUpdatedState(onColumnsChange)
-    return this.pointerInput(Unit) {
-        var scaleMultiplier = 1f
-        awaitEachGesture {
-            awaitFirstDown(requireUnconsumed = false)
-            var lastDistance = 0f
-            var isPinching = false
-            
-            do {
-                val event = awaitPointerEvent()
-                val pointers = event.changes.filter { it.pressed }
-                if (pointers.size >= 2) {
-                    val p1 = pointers[0].position
-                    val p2 = pointers[1].position
-                    val dx = p1.x - p2.x
-                    val dy = p1.y - p2.y
-                    val dist = kotlin.math.sqrt(dx * dx + dy * dy)
-                    
-                    if (!isPinching) {
-                        lastDistance = dist
-                        isPinching = true
-                    } else {
-                        if (lastDistance > 0f && dist > 0f) {
-                            val ratio = dist / lastDistance
-                            scaleMultiplier *= ratio
-                            lastDistance = dist
-                            
-                            val cols = currentColumns
-                            if (scaleMultiplier > 1.3f) {
-                                if (cols > 2) {
-                                    currentOnChange(cols - 1)
-                                    scaleMultiplier = 1.0f
-                                } else {
-                                    scaleMultiplier = 1.3f
-                                }
-                                event.changes.forEach { it.consume() }
-                            } else if (scaleMultiplier < 0.7f) {
-                                if (cols < 12) {
-                                    currentOnChange(cols + 1)
-                                    scaleMultiplier = 1.0f
-                                } else {
-                                    scaleMultiplier = 0.7f
-                                }
-                                event.changes.forEach { it.consume() }
-                            }
-                        }
-                    }
-                } else {
-                    isPinching = false
-                    scaleMultiplier = 1f
-                }
-            } while (event.changes.any { it.pressed })
+private fun GalleryTopBar(
+    destination: GalleryDestination,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(GalleryBackground.copy(alpha = 0.96f))
+            .padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 8.dp)
+    ) {
+        Column {
+            Text(
+                text = when (destination) {
+                    GalleryDestination.VIDEOS -> "视频"
+                    GalleryDestination.PHOTOS -> "图片"
+                    GalleryDestination.LIBRARY -> "资料库"
+                },
+                color = GalleryText,
+                style = MaterialTheme.typography.headlineMedium
+            )
+            if (destination == GalleryDestination.VIDEOS) {
+                Text("按时间浏览本机视频", color = GalleryTextMuted, fontSize = 11.sp)
+            }
+        }
+        IconButton(onClick = onRefresh, enabled = !isRefreshing) {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = if (isRefreshing) "正在刷新" else "刷新",
+                tint = if (isRefreshing) GalleryTextMuted else GalleryText
+            )
         }
     }
 }
+
+@Composable
+private fun GalleryNavigationBar(
+    destination: GalleryDestination,
+    onSelect: (GalleryDestination) -> Unit
+) {
+    NavigationBar(containerColor = GallerySurface.copy(alpha = 0.98f)) {
+        DestinationItem(
+            destination = GalleryDestination.VIDEOS,
+            current = destination,
+            icon = Icons.Default.PlayCircleOutline,
+            label = "视频",
+            tag = "destination-videos",
+            onSelect = onSelect
+        )
+        DestinationItem(
+            destination = GalleryDestination.PHOTOS,
+            current = destination,
+            icon = Icons.Default.Image,
+            label = "图片",
+            tag = "destination-photos",
+            onSelect = onSelect
+        )
+        DestinationItem(
+            destination = GalleryDestination.LIBRARY,
+            current = destination,
+            icon = Icons.Default.Collections,
+            label = "资料库",
+            tag = "destination-library",
+            onSelect = onSelect
+        )
+    }
+}
+
+@Composable
+private fun RowScope.DestinationItem(
+    destination: GalleryDestination,
+    current: GalleryDestination,
+    icon: ImageVector,
+    label: String,
+    tag: String,
+    onSelect: (GalleryDestination) -> Unit
+) {
+    NavigationBarItem(
+        selected = destination == current,
+        onClick = { onSelect(destination) },
+        icon = { Icon(icon, contentDescription = label) },
+        label = { Text(label) },
+        colors = NavigationBarItemDefaults.colors(
+            selectedIconColor = GalleryBackground,
+            selectedTextColor = GalleryIceBlue,
+            indicatorColor = GalleryIceBlue,
+            unselectedIconColor = GalleryTextMuted,
+            unselectedTextColor = GalleryTextMuted
+        ),
+        modifier = Modifier.testTag(tag)
+    )
+}
+
+@Composable
+private fun LibraryDestinationScreen(
+    onOpenSection: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val entries = listOf(
+        LibraryEntry("文件夹", Icons.Default.Folder, MediaRepository.ALL_VIDEOS),
+        LibraryEntry("收藏", Icons.Default.FavoriteBorder, MediaRepository.FAVORITES),
+        LibraryEntry("播放历史", Icons.Default.History, MediaRepository.RECENT_PLAYED),
+        LibraryEntry("播放列表", Icons.Default.PlaylistPlay, MediaRepository.PLAYLIST)
+    )
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = modifier
+            .fillMaxSize()
+            .background(GalleryBackground)
+            .padding(14.dp)
+            .testTag("library-destination")
+    ) {
+        entries.forEach { entry ->
+            LibraryRow(entry.icon, entry.label) { onOpenSection(entry.folderName) }
+        }
+        LibraryRow(Icons.Default.Settings, "设置", onOpenSettings)
+    }
+}
+
+@Composable
+private fun LibraryRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+    androidx.compose.material3.Surface(
+        onClick = onClick,
+        color = GallerySurface,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 15.dp)
+        ) {
+            Icon(icon, contentDescription = null, tint = GalleryIceBlue)
+            Spacer(Modifier.width(12.dp))
+            Text(label, color = GalleryText, fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+@Composable
+private fun PermissionScreen(title: String, message: String, onGrant: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(GalleryBackground),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp)
+        ) {
+            Icon(
+                Icons.Default.PlayCircleOutline,
+                contentDescription = null,
+                tint = GalleryIceBlue,
+                modifier = Modifier.size(42.dp)
+            )
+            Spacer(Modifier.height(14.dp))
+            Text(title, color = GalleryText, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Text(message, color = GalleryTextMuted, fontSize = 13.sp)
+            Spacer(Modifier.height(18.dp))
+            Button(onClick = onGrant) { Text("继续") }
+        }
+    }
+}
+
+private data class LibraryEntry(
+    val label: String,
+    val icon: ImageVector,
+    val folderName: String
+)
+
+private fun LibraryMedia.toMediaItem(type: MediaType): MediaItem = MediaItem(
+    id = mediaStoreId,
+    uri = Uri.parse(uri),
+    title = title,
+    displayName = displayName,
+    path = path,
+    folderName = folderName,
+    size = size,
+    dateAdded = dateAdded,
+    dateModified = dateModified,
+    duration = duration,
+    resolution = resolution,
+    type = type
+)
+
+private fun videoPermission(): String =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_VIDEO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+private fun photoPermission(): String =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_IMAGES
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+private fun hasVideoPermission(context: android.content.Context): Boolean =
+    ContextCompat.checkSelfPermission(context, videoPermission()) == PackageManager.PERMISSION_GRANTED
+
+private fun hasPhotoPermission(context: android.content.Context): Boolean =
+    ContextCompat.checkSelfPermission(context, photoPermission()) == PackageManager.PERMISSION_GRANTED

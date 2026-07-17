@@ -10,15 +10,16 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
 private val DarkColorScheme = darkColorScheme(
-    primary = PrimaryNeonPurple,
-    secondary = SecondaryNeonCyan,
+    primary = GalleryIceBlue,
+    secondary = GalleryIceBlue,
     tertiary = AccentPink,
-    background = CarbonBg,
-    surface = CarbonCard,
-    onPrimary = TextPrimary,
-    onSecondary = CarbonBg,
-    onBackground = TextPrimary,
-    onSurface = TextPrimary
+    background = GalleryBackground,
+    surface = GallerySurface,
+    surfaceVariant = GalleryRaisedSurface,
+    onPrimary = GalleryBackground,
+    onSecondary = GalleryBackground,
+    onBackground = GalleryText,
+    onSurface = GalleryText
 )
 
 @Composable
@@ -30,8 +31,8 @@ fun VideoPlayerTheme(
         SideEffect {
             val window = (view.context as Activity).window
             // Use solid Carbon background for regular screens, but can be customized for glass overlays
-            window.statusBarColor = CarbonBg.toArgb()
-            window.navigationBarColor = CarbonBg.toArgb()
+            window.statusBarColor = GalleryBackground.toArgb()
+            window.navigationBarColor = GalleryBackground.toArgb()
             
             val windowInsetsController = WindowCompat.getInsetsController(window, view)
             windowInsetsController.isAppearanceLightStatusBars = false

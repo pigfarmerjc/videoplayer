@@ -741,12 +741,15 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
 
     private fun MediaItem.toLibraryMedia(): LibraryMedia = LibraryMedia(
         id = storageKey,
+        mediaStoreId = id,
+        uri = uri.toString(),
         title = title,
         displayName = displayName,
         path = path,
         folderName = folderName,
         size = size,
         dateAdded = dateAdded,
+        dateModified = dateModified,
         duration = duration,
         resolution = resolution
     )

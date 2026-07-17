@@ -1,0 +1,361 @@
+package com.example.videoplayer.ui.gallery
+
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.videoplayer.data.model.MediaItem
+import com.example.videoplayer.media.thumbnail.ThumbnailPriority
+import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
+import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
+import com.example.videoplayer.media.thumbnail.ThumbnailSize
+import com.example.videoplayer.ui.components.formatDuration
+import com.example.videoplayer.ui.theme.GalleryBackground
+import com.example.videoplayer.ui.theme.GalleryIceBlue
+import com.example.videoplayer.ui.theme.GallerySurface
+import com.example.videoplayer.ui.theme.GalleryText
+import com.example.videoplayer.ui.theme.GalleryTextMuted
+import kotlinx.coroutines.flow.collectLatest
+import kotlin.math.abs
+
+internal data class GalleryVideo(
+    val media: MediaItem
+) : VideoTimelineItem {
+    override val id: String = media.storageKey
+    override val dateAddedEpochSeconds: Long = media.dateAdded
+}
+
+private sealed interface TimelineEntry {
+    val stableKey: String
+
+    data class Header(val section: VideoSection<GalleryVideo>) : TimelineEntry {
+        override val stableKey: String = "header:${section.stableKey}"
+    }
+
+    data class Video(val item: GalleryVideo) : TimelineEntry {
+        override val stableKey: String = "video:${item.media.resourceVersionKey}"
+    }
+}
+
+@Composable
+internal fun VideoGalleryGrid(
+    sections: List<VideoSection<GalleryVideo>>,
+    columnCount: Int,
+    selectedKeys: Set<String>,
+    progress: Map<String, Float>,
+    state: LazyGridState,
+    onColumnsChange: (Int) -> Unit,
+    onVideoClick: (MediaItem) -> Unit,
+    onVideoLongClick: (MediaItem) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val entries = remember(sections) {
+        buildList {
+            sections.forEach { section ->
+                add(TimelineEntry.Header(section))
+                section.items.forEach { add(TimelineEntry.Video(it)) }
+            }
+        }
+    }
+    val activeSection by remember(entries, state) {
+        androidx.compose.runtime.derivedStateOf {
+            entries.take(state.firstVisibleItemIndex + 1)
+                .filterIsInstance<TimelineEntry.Header>()
+                .lastOrNull()
+                ?.section
+                ?: sections.firstOrNull()
+        }
+    }
+    var presentationScale by remember { mutableFloatStateOf(1f) }
+    var previewColumns by remember(columnCount) { mutableFloatStateOf(columnCount.toFloat()) }
+    val scrollController = remember {
+        ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
+    }
+
+    DisposableEffect(scrollController) {
+        onDispose { scrollController.onScrollInProgressChanged(false) }
+    }
+    LaunchedEffect(state) {
+        var previousPosition = 0
+        var previousTime = System.nanoTime()
+        snapshotFlow {
+            Triple(state.isScrollInProgress, state.firstVisibleItemIndex, state.firstVisibleItemScrollOffset)
+        }.collect { (scrolling, index, offset) ->
+            val now = System.nanoTime()
+            val elapsedSeconds = ((now - previousTime).coerceAtLeast(1L)) / 1_000_000_000f
+            val position = index * 1_000 + offset
+            val velocity = abs(position - previousPosition) / elapsedSeconds
+            val fastScrolling = scrolling && (velocity > 800f || state.isScrollInProgress)
+            scrollController.onScrollInProgressChanged(fastScrolling)
+            previousPosition = position
+            previousTime = now
+        }
+    }
+
+    Box(modifier = modifier.background(GalleryBackground)) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columnCount),
+            state = state,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+            contentPadding = PaddingValues(top = 36.dp, bottom = 116.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .galleryPinch(
+                    columnCount = columnCount,
+                    onPreview = { columns ->
+                        previewColumns = columns
+                        presentationScale = (columnCount / columns).coerceIn(0.5f, 2f)
+                    },
+                    onCommit = { columns ->
+                        onColumnsChange(columns)
+                        presentationScale = 1f
+                        previewColumns = columns.toFloat()
+                    }
+                )
+                .graphicsLayer {
+                    scaleX = presentationScale
+                    scaleY = presentationScale
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0f)
+                }
+        ) {
+            items(
+                items = entries,
+                key = { it.stableKey },
+                contentType = { if (it is TimelineEntry.Header) "date-header" else "video-thumbnail" },
+                span = { entry ->
+                    if (entry is TimelineEntry.Header) GridItemSpan(maxLineSpan) else GridItemSpan(1)
+                }
+            ) { entry ->
+                when (entry) {
+                    is TimelineEntry.Header -> DateSectionHeader(entry.section)
+                    is TimelineEntry.Video -> VideoThumbnailItem(
+                        item = entry.item.media,
+                        selected = entry.item.id in selectedKeys,
+                        progress = progress[entry.item.id] ?: 0f,
+                        onClick = { onVideoClick(entry.item.media) },
+                        onLongClick = { onVideoLongClick(entry.item.media) }
+                    )
+                }
+            }
+        }
+
+        activeSection?.let { section ->
+            Text(
+                text = sectionTitle(section),
+                color = GalleryText,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .background(GalleryBackground.copy(alpha = 0.96f))
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .testTag("sticky-date-header")
+            )
+        }
+
+        if (presentationScale != 1f) {
+            Text(
+                text = "${previewColumns.toInt().coerceIn(2, 8)} 列",
+                color = GalleryBackground,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(10.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(GalleryIceBlue)
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DateSectionHeader(section: VideoSection<GalleryVideo>) {
+    Text(
+        text = sectionTitle(section),
+        color = GalleryTextMuted,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(GalleryBackground)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    )
+}
+
+@Composable
+private fun VideoThumbnailItem(
+    item: MediaItem,
+    selected: Boolean,
+    progress: Float,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(2.dp))
+            .background(GallerySurface)
+            .pointerInput(item.resourceVersionKey, selected) {
+                detectTapGestures(onLongPress = { onLongClick() }, onTap = { onClick() })
+            }
+            .testTag("video-item:${item.storageKey}")
+    ) {
+        GalleryThumbnail(item = item, modifier = Modifier.fillMaxSize())
+        Text(
+            text = formatDuration(item.duration),
+            color = Color.White,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 5.dp, bottom = 6.dp)
+                .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(3.dp))
+                .padding(horizontal = 4.dp, vertical = 2.dp)
+        )
+        if (progress > 0f) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth(progress.coerceIn(0f, 1f))
+                    .height(3.dp)
+                    .background(GalleryIceBlue)
+            )
+        }
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(GalleryIceBlue)
+                    .padding(3.dp)
+            ) {
+                Icon(Icons.Default.Check, contentDescription = "已选择", tint = GalleryBackground)
+            }
+        }
+    }
+}
+
+@Composable
+internal fun GalleryThumbnail(item: MediaItem, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var bitmap by remember(item.resourceVersionKey) { mutableStateOf<Bitmap?>(null) }
+    var thumbnailSize by remember { mutableStateOf(ThumbnailSize(360, 360)) }
+
+    LaunchedEffect(item.resourceVersionKey, thumbnailSize) {
+        bitmap = null
+        ThumbnailSchedulerProvider.request(
+            context = context,
+            item = item,
+            size = thumbnailSize,
+            priority = ThumbnailPriority.VISIBLE
+        ).collectLatest { bitmap = it.value }
+    }
+
+    Box(
+        modifier = modifier
+            .background(GallerySurface)
+            .onSizeChanged { size ->
+                if (size.width > 0 && size.height > 0) {
+                    thumbnailSize = ThumbnailSize(size.width, size.height)
+                }
+            }
+    ) {
+        bitmap?.let { image ->
+            Image(
+                painter = BitmapPainter(image.asImageBitmap()),
+                contentDescription = item.title.ifBlank { item.displayName },
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+private fun Modifier.galleryPinch(
+    columnCount: Int,
+    onPreview: (Float) -> Unit,
+    onCommit: (Int) -> Unit
+): Modifier = pointerInput(columnCount) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        var cumulativeZoom = 1f
+        var previewColumns = columnCount.toFloat()
+        var pinching = false
+        do {
+            val event = awaitPointerEvent()
+            if (event.changes.count { it.pressed } >= 2) {
+                pinching = true
+                cumulativeZoom *= event.calculateZoom()
+                previewColumns = previewGalleryColumnCount(columnCount, cumulativeZoom)
+                onPreview(previewColumns)
+                event.changes.forEach { change ->
+                    if (change.positionChanged()) change.consume()
+                }
+            }
+        } while (event.changes.any { it.pressed })
+
+        if (pinching) onCommit(commitGalleryColumnCount(previewColumns))
+    }
+}
+
+internal val MediaItem.resourceVersionKey: String
+    get() = "$storageKey|$uri|$dateModified"
+
+internal fun sectionTitle(section: VideoSection<GalleryVideo>): String = when (val key = section.key) {
+    VideoSectionKey.Today -> "今天"
+    VideoSectionKey.Yesterday -> "昨天"
+    VideoSectionKey.ThisWeek -> "本周"
+    is VideoSectionKey.Month -> "${key.yearMonth.year} 年 ${key.yearMonth.monthValue} 月"
+}

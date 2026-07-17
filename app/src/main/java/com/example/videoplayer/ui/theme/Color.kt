@@ -28,3 +28,11 @@ val CarbonCard = Color(0xFF12141A)
 val CarbonBorder = Color(0x1AFFFFFF)
 val GlowPurple = Color(0x228B5CF6)
 val GlowCyan = Color(0x2206B6D4)
+
+// Video gallery: quiet charcoal surfaces with a restrained ice-blue signal.
+val GalleryBackground = Color(0xFF15171A)
+val GallerySurface = Color(0xFF1D2024)
+val GalleryRaisedSurface = Color(0xFF262B30)
+val GalleryIceBlue = Color(0xFF91BFD3)
+val GalleryText = Color(0xFFF2F4F5)
+val GalleryTextMuted = Color(0xFFA1A8AE)
