@@ -38,4 +38,4 @@ DONE_WITH_CONCERNS
 
 ## Commit
 
-Pending commit at report creation.
+Implementation: `3a09a8f refactor: centralize media library state`.
