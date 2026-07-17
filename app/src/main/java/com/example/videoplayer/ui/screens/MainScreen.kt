@@ -10,9 +10,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -68,6 +70,8 @@ import com.example.videoplayer.ui.components.MediaGridTile
 import com.example.videoplayer.ui.components.MediaItemCard
 import com.example.videoplayer.ui.components.mediaPreviewRequest
 import com.example.videoplayer.ui.components.bounceClick
+import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
+import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
 import com.example.videoplayer.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -615,7 +619,18 @@ private fun MediaList(
         EmptyStateView("No media items found")
     } else {
         val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = PaddingValues(bottom = 96.dp)) {
+        val listState = rememberLazyListState()
+        val thumbnailScrollController = remember {
+            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
+        }
+        LaunchedEffect(listState.isScrollInProgress) {
+            thumbnailScrollController.onScrollInProgressChanged(listState.isScrollInProgress)
+        }
+        LazyColumn(
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(bottom = 96.dp)
+        ) {
             items(
                 items,
                 key = { it.storageKey },
@@ -656,7 +671,15 @@ private fun MediaGridView(
         EmptyStateView("No media items found")
     } else {
         val lastViewedKey = remember(folderName, items) { repository.lastViewedKey(folderName) }
+        val gridState = rememberLazyGridState()
+        val thumbnailScrollController = remember {
+            ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
+        }
+        LaunchedEffect(gridState.isScrollInProgress) {
+            thumbnailScrollController.onScrollInProgressChanged(gridState.isScrollInProgress)
+        }
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Adaptive(gridSizeDp.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp),

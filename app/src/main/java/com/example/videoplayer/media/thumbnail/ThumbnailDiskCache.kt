@@ -17,12 +17,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
-import java.util.concurrent.ConcurrentHashMap
 
 class ThumbnailDiskCache private constructor(
     private val context: Context
-) : ThumbnailCache<Bitmap>, ComponentCallbacks2 {
-    private val media = ConcurrentHashMap<Long, MediaItem>()
+) : ThumbnailCache<Bitmap, MediaItem>, ComponentCallbacks2 {
     private val maintenance = Channel<Unit>(Channel.CONFLATED)
     private val maintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cache = object : LruCache<ThumbnailKey, Bitmap>(memoryCacheSizeKb()) {
@@ -38,10 +36,6 @@ class ThumbnailDiskCache private constructor(
         }
     }
 
-    fun register(item: MediaItem) {
-        media[item.id] = item
-    }
-
     override suspend fun loadMemory(key: ThumbnailKey): Bitmap? = cache.get(key)
 
     override suspend fun loadDisk(key: ThumbnailKey): Bitmap? = withContext(Dispatchers.IO) {
@@ -53,16 +47,15 @@ class ThumbnailDiskCache private constructor(
         )?.also { file.setLastModified(System.currentTimeMillis()) }
     }
 
-    override suspend fun decode(key: ThumbnailKey): Bitmap? = withContext(Dispatchers.IO) {
-        val item = media[key.mediaId] ?: return@withContext null
+    override suspend fun decode(key: ThumbnailKey, source: MediaItem): Bitmap? = withContext(Dispatchers.IO) {
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                context.contentResolver.loadThumbnail(item.uri, Size(key.size.width, key.size.height), null)
+                context.contentResolver.loadThumbnail(source.uri, Size(key.size.width, key.size.height), null)
             } else {
                 @Suppress("DEPRECATION")
                 android.provider.MediaStore.Video.Thumbnails.getThumbnail(
                     context.contentResolver,
-                    item.id,
+                    source.id,
                     android.provider.MediaStore.Video.Thumbnails.MINI_KIND,
                     null
                 )
@@ -97,7 +90,7 @@ class ThumbnailDiskCache private constructor(
 
     private fun diskFile(key: ThumbnailKey): File {
         val directory = File(context.cacheDir, "grid_thumbnails").apply { mkdirs() }
-        return File(directory, "${key.mediaId}-${key.size.width}x${key.size.height}".sha256() + ".jpg")
+        return File(directory, "${key.resource.storageKey}|${key.resource.uri}|${key.resource.dateModified}|${key.size.width}x${key.size.height}".sha256() + ".jpg")
     }
 
     private fun trimDiskCache() {

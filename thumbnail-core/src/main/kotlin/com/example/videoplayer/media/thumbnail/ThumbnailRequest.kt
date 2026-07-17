@@ -5,8 +5,14 @@ data class ThumbnailSize(
     val height: Int
 )
 
+data class ThumbnailResourceIdentity(
+    val storageKey: String,
+    val uri: String,
+    val dateModified: Long
+)
+
 data class ThumbnailKey(
-    val mediaId: Long,
+    val resource: ThumbnailResourceIdentity,
     val size: ThumbnailSize
 )
 
@@ -21,10 +27,10 @@ data class ThumbnailResult<T : Any>(
     val value: T
 )
 
-interface ThumbnailCache<T : Any> {
+interface ThumbnailCache<T : Any, S : Any> {
     suspend fun loadMemory(key: ThumbnailKey): T?
     suspend fun loadDisk(key: ThumbnailKey): T?
-    suspend fun decode(key: ThumbnailKey): T?
+    suspend fun decode(key: ThumbnailKey, source: S): T?
     suspend fun putMemory(key: ThumbnailKey, value: T)
     suspend fun writeDisk(key: ThumbnailKey, value: T)
 }

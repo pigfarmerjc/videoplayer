@@ -13,6 +13,7 @@ data class MediaItem(
     val folderName: String,
     val size: Long,
     val dateAdded: Long,
+    val dateModified: Long = dateAdded,
     val duration: Long = 0L,  // 0 for images, ms for videos/audios
     val resolution: String = "",
     val type: MediaType,

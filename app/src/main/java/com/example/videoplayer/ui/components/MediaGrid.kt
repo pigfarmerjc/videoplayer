@@ -776,13 +776,16 @@ fun mediaPreviewRequest(item: MediaItem, allowAnimated: Boolean = true): ImageRe
 private fun LightweightMediaPreview(item: MediaItem, contentDescription: String?) {
     if (item.type == MediaType.VIDEO) {
         val context = LocalContext.current
-        var bitmapState by remember(item.id) { mutableStateOf<Bitmap?>(null) }
+        val thumbnailSize = remember { ThumbnailSize(360, 220) }
+        var bitmapState by remember(item.storageKey, item.uri, item.dateModified, thumbnailSize) {
+            mutableStateOf<Bitmap?>(null)
+        }
 
-        LaunchedEffect(item.id, item.uri) {
+        LaunchedEffect(item.storageKey, item.uri, item.dateModified, thumbnailSize) {
             ThumbnailSchedulerProvider.request(
                 context = context,
                 item = item,
-                size = ThumbnailSize(360, 220),
+                size = thumbnailSize,
                 priority = ThumbnailPriority.VISIBLE
             ).collect { result ->
                 bitmapState = result.value

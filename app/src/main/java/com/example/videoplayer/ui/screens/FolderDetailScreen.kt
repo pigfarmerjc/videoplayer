@@ -48,6 +48,8 @@ import com.example.videoplayer.ui.components.folderDisplayName
 import com.example.videoplayer.ui.components.GlassmorphicCard
 import com.example.videoplayer.ui.components.AppBackground
 import com.example.videoplayer.ui.components.bounceClick
+import com.example.videoplayer.media.thumbnail.ThumbnailSchedulerProvider
+import com.example.videoplayer.media.thumbnail.ThumbnailScrollController
 import com.example.videoplayer.ui.theme.CarbonBg
 import com.example.videoplayer.ui.theme.CarbonBorder
 import com.example.videoplayer.ui.theme.SecondaryNeonCyan
@@ -93,6 +95,17 @@ fun FolderDetailScreen(
     val lifecycleOwner = LocalContext.current as? LifecycleOwner
     val scope = rememberCoroutineScope()
     var layoutMode by remember { mutableStateOf(repository.getFolderLayoutMode()) }
+    val thumbnailScrollController = remember {
+        ThumbnailScrollController(ThumbnailSchedulerProvider::setFastScrolling)
+    }
+    LaunchedEffect(layoutMode, listState.isScrollInProgress, gridState.isScrollInProgress) {
+        val isScrolling = if (layoutMode == LayoutMode.LIST) {
+            listState.isScrollInProgress
+        } else {
+            gridState.isScrollInProgress
+        }
+        thumbnailScrollController.onScrollInProgressChanged(isScrolling)
+    }
     var galleryColumns by remember { mutableIntStateOf(repository.getGalleryColumnCount()) }
     // 网格尺寸档位: 140=小, 220=中, 320=大
     var gridSizeDp by remember { mutableIntStateOf(repository.getFolderGridSize()) }

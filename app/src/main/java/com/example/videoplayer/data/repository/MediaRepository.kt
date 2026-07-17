@@ -590,6 +590,7 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
                     folderName = getParentFolderName(path, interner),
                     size = file.length(),
                     dateAdded = file.lastModified() / 1000,
+                    dateModified = file.lastModified() / 1000,
                     duration = 0L,
                     resolution = "",
                     type = type
@@ -606,6 +607,7 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
             MediaStore.Video.Media.DATA,
             MediaStore.Video.Media.SIZE,
             MediaStore.Video.Media.DATE_ADDED,
+            MediaStore.Video.Media.DATE_MODIFIED,
             MediaStore.Video.Media.DURATION,
             MediaStore.Video.Media.RESOLUTION
         )
@@ -621,6 +623,7 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
                 folderName = getParentFolderName(path, interner),
                 size = cursor.getLong(MediaStore.Video.Media.SIZE),
                 dateAdded = cursor.getLong(MediaStore.Video.Media.DATE_ADDED),
+                dateModified = cursor.getLong(MediaStore.Video.Media.DATE_MODIFIED),
                 duration = cursor.getLong(MediaStore.Video.Media.DURATION),
                 resolution = cursor.getStringOrEmpty(MediaStore.Video.Media.RESOLUTION),
                 type = MediaType.VIDEO
@@ -635,7 +638,8 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
             MediaStore.Files.FileColumns.DISPLAY_NAME,
             MediaStore.Files.FileColumns.DATA,
             MediaStore.Files.FileColumns.SIZE,
-            MediaStore.Files.FileColumns.DATE_ADDED
+            MediaStore.Files.FileColumns.DATE_ADDED,
+            MediaStore.Files.FileColumns.DATE_MODIFIED
         )
         val selection = "(${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ? COLLATE NOCASE OR ${MediaStore.Files.FileColumns.DATA} LIKE ? COLLATE NOCASE)"
         val selectionArgs = arrayOf("%.iso", "%.iso")
@@ -652,6 +656,7 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
                 folderName = getParentFolderName(path, interner),
                 size = cursor.getLong(MediaStore.Files.FileColumns.SIZE),
                 dateAdded = cursor.getLong(MediaStore.Files.FileColumns.DATE_ADDED),
+                dateModified = cursor.getLong(MediaStore.Files.FileColumns.DATE_MODIFIED),
                 duration = 0L,
                 resolution = "",
                 type = MediaType.VIDEO
@@ -666,7 +671,8 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
             MediaStore.Images.Media.TITLE,
             MediaStore.Images.Media.DATA,
             MediaStore.Images.Media.SIZE,
-            MediaStore.Images.Media.DATE_ADDED
+            MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.DATE_MODIFIED
         )
         return query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, projection) { cursor ->
             val id = cursor.getLong(MediaStore.Images.Media._ID)
@@ -680,6 +686,7 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
                 folderName = getParentFolderName(path, interner),
                 size = cursor.getLong(MediaStore.Images.Media.SIZE),
                 dateAdded = cursor.getLong(MediaStore.Images.Media.DATE_ADDED),
+                dateModified = cursor.getLong(MediaStore.Images.Media.DATE_MODIFIED),
                 type = MediaType.PHOTO
             )
         }
