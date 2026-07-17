@@ -87,9 +87,11 @@ git commit -m "refactor: focus library on video and photos"
 ### Task 2: Establish performance trace points and benchmark fixtures
 
 **Files:**
-- Modify: `app/build.gradle.kts`
+- Modify: `settings.gradle.kts`
+- Modify: `gradle/libs.versions.toml`
+- Create: `benchmark/build.gradle.kts`
+- Create: `benchmark/src/main/java/com/example/videoplayer/benchmark/VideoGalleryScrollBenchmark.kt`
 - Create: `app/src/main/java/com/example/videoplayer/performance/MediaTrace.kt`
-- Create: `app/src/androidTest/java/com/example/videoplayer/VideoGalleryScrollBenchmark.kt`
 - Create: `scripts/generate_pcm_fixtures.ps1`
 - Modify: `.gitignore`
 
@@ -97,18 +99,25 @@ git commit -m "refactor: focus library on video and photos"
 - Produces: `MediaTrace.section(name: String, block: () -> T): T`.
 - Produces: generated fixtures under ignored `test-media/pcm/`.
 
-- [ ] **Step 1: Add Android benchmark dependencies and failing smoke benchmark**
+- [ ] **Step 1: Add a dedicated Android benchmark module and failing smoke benchmark**
 
 ```kotlin
-androidTestImplementation("androidx.benchmark:benchmark-macro-junit4:1.2.4")
-androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+include(":benchmark")
+
+// benchmark/build.gradle.kts
+plugins { alias(libs.plugins.android.test) }
+android { targetProjectPath = ":app" }
+dependencies {
+    implementation(libs.androidx.benchmark.macro.junit4)
+    implementation(libs.androidx.test.uiautomator)
+}
 ```
 
 The benchmark must launch the main activity, wait for the video grid and fling ten times while collecting `FrameTimingMetric()`.
 
 - [ ] **Step 2: Run instrumentation compilation**
 
-Run: `./gradlew.bat compileDebugAndroidTestKotlin`  
+Run: `./gradlew.bat :benchmark:compileBenchmarkKotlin`
 Expected: initial FAIL until benchmark runner and source compile.
 
 - [ ] **Step 3: Add trace wrapper and fixture generator**
@@ -124,7 +133,7 @@ The PowerShell script invokes `ffmpeg` to generate 5-second color-bar videos wit
 
 - [ ] **Step 4: Compile tests and generate fixtures where ffmpeg exists**
 
-Run: `./gradlew.bat compileDebugAndroidTestKotlin`  
+Run: `./gradlew.bat :benchmark:compileBenchmarkKotlin`
 Expected: BUILD SUCCESSFUL.  
 Run: `powershell -ExecutionPolicy Bypass -File scripts/generate_pcm_fixtures.ps1`  
 Expected: three verified files, or a clear prerequisite error without modifying source.
@@ -132,7 +141,7 @@ Expected: three verified files, or a clear prerequisite error without modifying 
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add app/build.gradle.kts app/src/main/java/com/example/videoplayer/performance app/src/androidTest scripts .gitignore
+git add settings.gradle.kts gradle/libs.versions.toml benchmark app/src/main/java/com/example/videoplayer/performance scripts .gitignore
 git commit -m "test: add media performance and pcm fixtures"
 ```
 

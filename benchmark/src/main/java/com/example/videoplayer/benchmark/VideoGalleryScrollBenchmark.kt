@@ -7,7 +7,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.Until
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -19,8 +18,6 @@ class VideoGalleryScrollBenchmark {
 
     @Test
     fun flingVideoGallery() {
-        assumeVideoGalleryScenarioIsAvailable()
-
         benchmarkRule.measureRepeated(
             packageName = TARGET_PACKAGE,
             metrics = listOf(FrameTimingMetric()),
@@ -42,13 +39,6 @@ class VideoGalleryScrollBenchmark {
                 device.waitForIdle()
             }
         }
-    }
-
-    private fun assumeVideoGalleryScenarioIsAvailable() {
-        assumeTrue(
-            "Task 6 must remove this prerequisite after it adds the video-gallery tag.",
-            false
-        )
     }
 
     private companion object {
