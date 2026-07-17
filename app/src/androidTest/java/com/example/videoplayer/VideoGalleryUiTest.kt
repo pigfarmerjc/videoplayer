@@ -12,7 +12,9 @@ import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.ui.screens.MainGalleryContent
 import com.example.videoplayer.ui.gallery.GalleryAspectMode
+import com.example.videoplayer.ui.gallery.PermissionRecoveryAction
 import com.example.videoplayer.ui.photos.PhotoAccessState
+import com.example.videoplayer.ui.screens.MediaPermissionScreen
 import com.example.videoplayer.ui.theme.VideoPlayerTheme
 import org.junit.Rule
 import org.junit.Test
@@ -140,6 +142,25 @@ class VideoGalleryUiTest {
         composeRule.onNodeWithTag("selection-actions").assertIsDisplayed()
         composeRule.runOnIdle { requireNotNull(confirmDeletion).invoke() }
         composeRule.onNodeWithTag("selection-actions").assertDoesNotExist()
+    }
+
+    @Test
+    fun permanentVideoPermissionDenialOpensSystemSettings() {
+        var openedSettings = false
+        composeRule.setContent {
+            VideoPlayerTheme {
+                MediaPermissionScreen(
+                    title = "允许访问视频",
+                    message = "请在系统设置中允许访问视频。",
+                    action = PermissionRecoveryAction.OPEN_SETTINGS,
+                    onRequest = {},
+                    onOpenSettings = { openedSettings = true }
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("open-video-settings").performClick()
+        composeRule.runOnIdle { assert(openedSettings) }
     }
 
     private fun setGalleryContent(

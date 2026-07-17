@@ -218,20 +218,14 @@ class ThumbnailSchedulerTest {
         val tracker = GridScrollVelocityTracker()
         val gate = FastScrollGate(enterVelocity = 1_800f)
 
-        tracker.update(
-            firstVisibleItemIndex = 0,
-            firstVisibleItemScrollOffset = 190,
-            columns = 4,
-            averageLineSizePx = 200f,
-            elapsedSeconds = 0f
-        )
-        val velocity = tracker.update(
-            firstVisibleItemIndex = 4,
-            firstVisibleItemScrollOffset = 10,
-            columns = 4,
-            averageLineSizePx = 200f,
-            elapsedSeconds = 0.1f
-        )
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 0, mainAxisOffset = -190, mainAxisSize = 200)
+        tracker.addVisibleLine(line = 1, mainAxisOffset = 10, mainAxisSize = 200)
+        tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 0)
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 1, mainAxisOffset = -10, mainAxisSize = 200)
+        tracker.addVisibleLine(line = 2, mainAxisOffset = 190, mainAxisSize = 200)
+        val velocity = tracker.endSample(elapsedSeconds = 0.1f, mainAxisSpacing = 0)
 
         assertEquals(200f, velocity, 0.01f)
         assertEquals(false, gate.update(isScrollInProgress = true, velocity = velocity))
@@ -242,17 +236,55 @@ class ThumbnailSchedulerTest {
         val tracker = GridScrollVelocityTracker()
         val gate = FastScrollGate(enterVelocity = 1_800f)
 
-        tracker.update(0, 0, columns = 4, averageLineSizePx = 200f, elapsedSeconds = 0f)
-        val velocity = tracker.update(
-            firstVisibleItemIndex = 12,
-            firstVisibleItemScrollOffset = 20,
-            columns = 4,
-            averageLineSizePx = 200f,
-            elapsedSeconds = 0.1f
-        )
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 0, mainAxisOffset = 0, mainAxisSize = 200)
+        tracker.addVisibleLine(line = 1, mainAxisOffset = 200, mainAxisSize = 200)
+        tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 0)
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 3, mainAxisOffset = -20, mainAxisSize = 200)
+        tracker.addVisibleLine(line = 4, mainAxisOffset = 180, mainAxisSize = 200)
+        val velocity = tracker.endSample(elapsedSeconds = 0.1f, mainAxisSpacing = 0)
 
         assertEquals(6_200f, velocity, 0.01f)
         assertEquals(true, gate.update(isScrollInProgress = true, velocity = velocity))
+    }
+
+    @Test
+    fun visibleLineOffsetsStayContinuousWhenAFullSpanHeaderLeavesTheViewport() {
+        val tracker = GridScrollVelocityTracker()
+
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 0, mainAxisOffset = -38, mainAxisSize = 40)
+        tracker.addVisibleLine(line = 1, mainAxisOffset = 4, mainAxisSize = 100)
+        assertEquals(0f, tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 2), 0.01f)
+
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 1, mainAxisOffset = -6, mainAxisSize = 100)
+        tracker.addVisibleLine(line = 2, mainAxisOffset = 96, mainAxisSize = 100)
+        val velocity = tracker.endSample(elapsedSeconds = 0.1f, mainAxisSpacing = 2)
+
+        assertEquals(100f, velocity, 0.01f)
+    }
+
+    @Test
+    fun resettingVisibleLinesAfterColumnChangeDoesNotCreateAFakeFling() {
+        val tracker = GridScrollVelocityTracker()
+
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 4, mainAxisOffset = 0, mainAxisSize = 100)
+        tracker.addVisibleLine(line = 5, mainAxisOffset = 102, mainAxisSize = 100)
+        tracker.endSample(elapsedSeconds = 0f, mainAxisSpacing = 2)
+
+        tracker.reset()
+        tracker.beginSample()
+        tracker.addVisibleLine(line = 2, mainAxisOffset = 0, mainAxisSize = 100)
+        tracker.addVisibleLine(line = 3, mainAxisOffset = 102, mainAxisSize = 100)
+
+        assertEquals(
+            0f,
+            tracker.endSample(elapsedSeconds = 0.01f, mainAxisSpacing = 2),
+            0.01f
+        )
     }
 
     private fun resource(name: String, version: Long) = ThumbnailResourceIdentity(

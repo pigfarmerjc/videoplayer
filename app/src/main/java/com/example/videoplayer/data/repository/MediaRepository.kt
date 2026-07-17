@@ -376,6 +376,13 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
         prefs.edit().putString("gallery_aspect_mode", value).apply()
     }
 
+    fun wasVideoPermissionRequestedOnce(): Boolean =
+        prefs.getBoolean("video_permission_requested_once", false)
+
+    fun setVideoPermissionRequestedOnce() {
+        prefs.edit().putBoolean("video_permission_requested_once", true).apply()
+    }
+
     fun wasPhotoPermissionRequestedOnce(): Boolean =
         prefs.getBoolean("photo_permission_requested_once", false)
 

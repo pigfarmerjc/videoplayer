@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridItemInfo
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -329,28 +330,31 @@ internal fun BindThumbnailFastScroll(state: LazyGridState, columns: Int) {
     DisposableEffect(scrollController) {
         onDispose { scrollController.onScrollInProgressChanged(false) }
     }
-    LaunchedEffect(state) {
+    LaunchedEffect(state, columns) {
+        velocityTracker.reset()
+        gate.update(isScrollInProgress = false, velocity = 0f)
+        scrollController.onScrollInProgressChanged(false)
         var previousTime = System.nanoTime()
         snapshotFlow {
             val layoutInfo = state.layoutInfo
             GridScrollSample(
                 scrolling = state.isScrollInProgress,
-                firstVisibleItemIndex = state.firstVisibleItemIndex,
-                firstVisibleItemScrollOffset = state.firstVisibleItemScrollOffset,
-                columns = columns.coerceAtLeast(1),
-                averageLineSizePx = layoutInfo.visibleItemsInfo.averageGridLineSizePx()
+                visibleItems = layoutInfo.visibleItemsInfo,
+                mainAxisSpacing = layoutInfo.mainAxisItemSpacing
             )
         }.collect { sample ->
             val now = System.nanoTime()
             val elapsedSeconds = ((now - previousTime).coerceAtLeast(1L)) / 1_000_000_000f
             val velocity = if (sample.scrolling) {
-                velocityTracker.update(
-                    firstVisibleItemIndex = sample.firstVisibleItemIndex,
-                    firstVisibleItemScrollOffset = sample.firstVisibleItemScrollOffset,
-                    columns = sample.columns,
-                    averageLineSizePx = sample.averageLineSizePx,
-                    elapsedSeconds = elapsedSeconds
-                )
+                velocityTracker.beginSample()
+                sample.visibleItems.forEach { item ->
+                    velocityTracker.addVisibleLine(
+                        line = item.row,
+                        mainAxisOffset = item.offset.y,
+                        mainAxisSize = item.size.height
+                    )
+                }
+                velocityTracker.endSample(elapsedSeconds, sample.mainAxisSpacing)
             } else {
                 velocityTracker.reset()
                 0f
@@ -363,23 +367,9 @@ internal fun BindThumbnailFastScroll(state: LazyGridState, columns: Int) {
 
 private data class GridScrollSample(
     val scrolling: Boolean,
-    val firstVisibleItemIndex: Int,
-    val firstVisibleItemScrollOffset: Int,
-    val columns: Int,
-    val averageLineSizePx: Float
+    val visibleItems: List<LazyGridItemInfo>,
+    val mainAxisSpacing: Int
 )
-
-private fun List<androidx.compose.foundation.lazy.grid.LazyGridItemInfo>.averageGridLineSizePx(): Float {
-    if (isEmpty()) return 0f
-    val rowOffsets = map { it.offset.y }.distinct().sorted()
-    val lineDistances = rowOffsets.zipWithNext { first, second -> second - first }
-        .filter { it > 0 }
-    return if (lineDistances.isNotEmpty()) {
-        lineDistances.average().toFloat()
-    } else {
-        maxOf { it.size.height }.toFloat()
-    }
-}
 
 private fun Modifier.galleryPinch(
     columnCount: Int,

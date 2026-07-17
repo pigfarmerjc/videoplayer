@@ -128,6 +128,18 @@ fun MainScreen(
     val libraryState by store.state.collectAsState()
     var hasVideoPermission by remember { mutableStateOf(hasVideoPermission(context)) }
     var hasPhotoPermission by remember { mutableStateOf(hasPhotoPermission(context)) }
+    var videoPermissionRequestedOnce by remember {
+        mutableStateOf(repository.wasVideoPermissionRequestedOnce())
+    }
+    var videoPermissionAction by remember {
+        mutableStateOf(
+            resolvePermissionRecoveryAction(
+                granted = hasVideoPermission,
+                requestedOnce = videoPermissionRequestedOnce,
+                shouldShowRationale = activity.shouldShowRequestPermissionRationale(videoPermission())
+            )
+        )
+    }
     var photoPermissionRequestedOnce by remember {
         mutableStateOf(repository.wasPhotoPermissionRequestedOnce())
     }
@@ -151,6 +163,14 @@ fun MainScreen(
         scope.launch { store.refresh(force = true) }
     }
 
+    fun openAppSettings() {
+        context.startActivity(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+            }
+        )
+    }
+
     val deleteRequestLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
@@ -172,6 +192,11 @@ fun MainScreen(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasVideoPermission = granted
+        videoPermissionAction = resolvePermissionRecoveryAction(
+            granted = granted,
+            requestedOnce = videoPermissionRequestedOnce,
+            shouldShowRationale = activity.shouldShowRequestPermissionRationale(videoPermission())
+        )
         if (granted) scope.launch { store.refresh(force = false) }
     }
     val photoPermissionLauncher = rememberLauncherForActivityResult(
@@ -186,6 +211,12 @@ fun MainScreen(
             )
         }
         if (granted) refreshLibrary()
+    }
+
+    fun requestVideoPermission() {
+        videoPermissionRequestedOnce = true
+        repository.setVideoPermissionRequestedOnce()
+        videoPermissionLauncher.launch(videoPermission())
     }
 
     fun requestPhotoPermission() {
@@ -204,6 +235,13 @@ fun MainScreen(
                     photoGranted != hasPhotoPermission
                 hasVideoPermission = videoGranted
                 hasPhotoPermission = photoGranted
+                videoPermissionAction = resolvePermissionRecoveryAction(
+                    granted = videoGranted,
+                    requestedOnce = videoPermissionRequestedOnce,
+                    shouldShowRationale = activity.shouldShowRequestPermissionRationale(
+                        videoPermission()
+                    )
+                )
                 photoAccessState = if (photoGranted) {
                     PhotoAccessState.Available
                 } else {
@@ -229,8 +267,8 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         if (hasVideoPermission) {
             store.refresh(force = false)
-        } else {
-            videoPermissionLauncher.launch(videoPermission())
+        } else if (!videoPermissionRequestedOnce) {
+            requestVideoPermission()
         }
     }
 
@@ -290,10 +328,16 @@ fun MainScreen(
     }
 
     if (!hasVideoPermission) {
-        PermissionScreen(
+        MediaPermissionScreen(
             title = "允许访问视频",
-            message = "需要读取本机视频，才能建立时间画廊。",
-            onGrant = { videoPermissionLauncher.launch(videoPermission()) }
+            message = if (videoPermissionAction == PermissionRecoveryAction.OPEN_SETTINGS) {
+                "请在系统设置中允许访问视频。"
+            } else {
+                "需要读取本机视频，才能建立时间画廊。"
+            },
+            action = videoPermissionAction,
+            onRequest = ::requestVideoPermission,
+            onOpenSettings = ::openAppSettings
         )
         return
     }
@@ -335,13 +379,7 @@ fun MainScreen(
         },
         photoAccessState = photoAccessState,
         onRequestPhotoPermission = ::requestPhotoPermission,
-        onOpenPhotoSettings = {
-            context.startActivity(
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.fromParts("package", context.packageName, null)
-                }
-            )
-        },
+        onOpenPhotoSettings = ::openAppSettings,
         onRetryPhotoQuery = ::refreshLibrary,
         videoQueryError = videoQueryError,
         onRetryVideoQuery = ::refreshLibrary,
@@ -650,7 +688,13 @@ private fun LibraryRow(icon: ImageVector, label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PermissionScreen(title: String, message: String, onGrant: () -> Unit) {
+internal fun MediaPermissionScreen(
+    title: String,
+    message: String,
+    action: PermissionRecoveryAction,
+    onRequest: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -672,7 +716,17 @@ private fun PermissionScreen(title: String, message: String, onGrant: () -> Unit
             Spacer(Modifier.height(6.dp))
             Text(message, color = GalleryTextMuted, fontSize = 13.sp)
             Spacer(Modifier.height(18.dp))
-            Button(onClick = onGrant) { Text("继续") }
+            when (action) {
+                PermissionRecoveryAction.REQUEST -> Button(
+                    onClick = onRequest,
+                    modifier = Modifier.testTag("request-video-permission")
+                ) { Text("继续") }
+                PermissionRecoveryAction.OPEN_SETTINGS -> Button(
+                    onClick = onOpenSettings,
+                    modifier = Modifier.testTag("open-video-settings")
+                ) { Text("打开系统设置") }
+                PermissionRecoveryAction.NONE -> Unit
+            }
         }
     }
 }
