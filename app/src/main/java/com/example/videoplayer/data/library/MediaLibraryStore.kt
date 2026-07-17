@@ -1,6 +1,5 @@
 package com.example.videoplayer.data.library
 
-import com.example.videoplayer.data.model.MediaItem
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -17,80 +16,115 @@ class MediaLibraryStore(
     private val generation = AtomicLong(0L)
     private val _state = MutableStateFlow(MediaLibraryState())
     private var activeNonForcedRefresh: RefreshRequest? = null
+    private var activeForcedRefresh: RefreshRequest? = null
 
     val state: StateFlow<MediaLibraryState> = _state.asStateFlow()
 
     suspend fun refresh(force: Boolean) {
-        val (request, startsScan) = refreshMutex.withLock {
-            if (!force) {
-                activeNonForcedRefresh?.let { return@withLock it to false }
+        val selection = selectRequest(force)
+        try {
+            if (selection.startsScan) {
+                completeRequest(selection.request, force)
             }
-
-            RefreshRequest(
-                generation = generation.incrementAndGet(),
-                completion = CompletableDeferred()
-            ).also { next ->
-                if (!force) activeNonForcedRefresh = next
-            } to true
+            publishIfCurrent(selection.request)
+        } catch (error: CancellationException) {
+            if (selection.startsScan) {
+                settleCancelledRequest(selection.request)
+            }
+            throw error
+        } finally {
+            if (selection.startsScan) {
+                releaseRequest(selection.request)
+            }
         }
-
-        if (startsScan) {
-            executeScan(request, force)
-        }
-
-        publishIfCurrent(request)
     }
 
-    private suspend fun executeScan(request: RefreshRequest, force: Boolean) {
-        setRefreshingIfCurrent(request.generation)
-        try {
-            request.completion.complete(RefreshOutcome.ScanResult(scanner.scan(force)))
+    private suspend fun selectRequest(force: Boolean): RequestSelection = refreshMutex.withLock {
+        if (!force) {
+            activeForcedRefresh?.let { return@withLock RequestSelection(it, startsScan = false) }
+            activeNonForcedRefresh?.let { return@withLock RequestSelection(it, startsScan = false) }
+        }
+
+        val request = RefreshRequest(
+            generation = generation.incrementAndGet(),
+            completion = CompletableDeferred()
+        )
+        if (force) {
+            activeForcedRefresh = request
+        } else {
+            activeNonForcedRefresh = request
+        }
+        _state.value = _state.value.copy(
+            generation = request.generation,
+            isRefreshing = true,
+            error = null
+        )
+        RequestSelection(request, startsScan = true)
+    }
+
+    private suspend fun completeRequest(request: RefreshRequest, force: Boolean) {
+        val outcome = try {
+            RefreshOutcome.ScanResult(scanner.scan(force))
         } catch (error: CancellationException) {
-            request.completion.cancel(error)
             throw error
         } catch (error: Throwable) {
-            request.completion.complete(RefreshOutcome.ScanFailure(error))
-        } finally {
-            refreshMutex.withLock {
-                if (activeNonForcedRefresh === request) {
-                    activeNonForcedRefresh = null
-                }
-            }
+            RefreshOutcome.ScanFailure(error)
         }
+        request.completion.complete(outcome)
     }
 
     private suspend fun publishIfCurrent(request: RefreshRequest) {
         val outcome = request.completion.await()
-        if (request.generation != generation.get()) return
-
-        _state.value = when (outcome) {
-            is RefreshOutcome.ScanResult -> outcome.result.toState(request.generation)
-            is RefreshOutcome.ScanFailure -> MediaLibraryState(
-                generation = request.generation,
-                error = LibraryError.ScanFailure(outcome.cause)
-            )
+        refreshMutex.withLock {
+            if (request.generation != generation.get()) return
+            _state.value = when (outcome) {
+                is RefreshOutcome.ScanResult -> outcome.result.toState(request.generation)
+                is RefreshOutcome.ScanFailure -> MediaLibraryState(
+                    generation = request.generation,
+                    error = LibraryError.ScanFailure(outcome.cause)
+                )
+            }
         }
     }
 
-    private fun setRefreshingIfCurrent(requestGeneration: Long) {
-        if (requestGeneration != generation.get()) return
-        _state.value = _state.value.copy(
-            generation = requestGeneration,
-            isRefreshing = true,
-            error = null
-        )
+    private suspend fun settleCancelledRequest(request: RefreshRequest) {
+        refreshMutex.withLock {
+            request.completion.cancel()
+            clearActiveRequest(request)
+            if (request.generation == generation.get()) {
+                _state.value = _state.value.copy(isRefreshing = false)
+            }
+        }
+    }
+
+    private suspend fun releaseRequest(request: RefreshRequest) {
+        refreshMutex.withLock {
+            clearActiveRequest(request)
+        }
+    }
+
+    private fun clearActiveRequest(request: RefreshRequest) {
+        if (activeNonForcedRefresh === request) {
+            activeNonForcedRefresh = null
+        }
+        if (activeForcedRefresh === request && (
+                activeNonForcedRefresh == null || request.completion.isCancelled
+            )
+        ) {
+            activeForcedRefresh = null
+        }
+        if (activeNonForcedRefresh == null && activeForcedRefresh?.completion?.isCompleted == true) {
+            activeForcedRefresh = null
+        }
     }
 
     private fun MediaLibraryScanResult.toState(generation: Long): MediaLibraryState {
-        val videoQuery = videos
-        val photoQuery = photos
-        val videoFailure = (videoQuery as? MediaQueryResult.Failure)?.cause
-        val photoFailure = (photoQuery as? MediaQueryResult.Failure)?.cause
+        val videoFailure = (videos as? MediaQueryResult.Failure)?.cause
+        val photoFailure = (photos as? MediaQueryResult.Failure)?.cause
         return MediaLibraryState(
             generation = generation,
-            videos = videoQuery.itemsOrEmpty(),
-            photos = photoQuery.itemsOrEmpty(),
-            isRefreshing = false,
+            videos = videos.itemsOrEmpty(),
+            photos = photos.itemsOrEmpty(),
             error = if (videoFailure == null && photoFailure == null) {
                 null
             } else {
@@ -99,10 +133,15 @@ class MediaLibraryStore(
         )
     }
 
-    private fun MediaQueryResult.itemsOrEmpty(): List<MediaItem> = when (this) {
+    private fun MediaQueryResult.itemsOrEmpty(): List<LibraryMedia> = when (this) {
         is MediaQueryResult.Success -> items
         is MediaQueryResult.Failure -> emptyList()
     }
+
+    private data class RequestSelection(
+        val request: RefreshRequest,
+        val startsScan: Boolean
+    )
 
     private data class RefreshRequest(
         val generation: Long,

@@ -1,14 +1,15 @@
 package com.example.videoplayer.data.library
 
-import com.example.videoplayer.data.model.MediaItem
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaLibraryStoreTest {
@@ -20,17 +21,59 @@ class MediaLibraryStoreTest {
 
         scanner.started(0).await()
         val second = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = true) }
-
         scanner.started(1).await()
-        scanner.complete(1, success(videos = mediaItems(2)))
+
+        scanner.complete(1, success(videos = listOf(media("newer"))))
         second.await()
-        scanner.complete(0, success(videos = mediaItems(1)))
+        scanner.complete(0, success(videos = listOf(media("older"))))
         first.await()
 
         assertEquals(2, store.state.value.generation)
-        assertEquals(2, store.state.value.videos.size)
+        assertEquals(listOf(media("newer")), store.state.value.videos)
         assertFalse(store.state.value.isRefreshing)
+    }
+
+    @Test
+    fun ordinaryRefreshAfterForcedRefreshJoinsForcedGeneration() = runBlocking {
+        val scanner = DeferredScanner()
+        val store = MediaLibraryStore(scanner)
+        val ordinaryA = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        scanner.started(0).await()
+        val forcedB = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = true) }
+        scanner.started(1).await()
+        val ordinaryC = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
         assertEquals(listOf(false, true), scanner.calls)
+        scanner.complete(1, success(videos = listOf(media("forced"))))
+        forcedB.await()
+        ordinaryC.await()
+        scanner.complete(0, success(videos = listOf(media("ordinary"))))
+        ordinaryA.await()
+
+        assertEquals(2, store.state.value.generation)
+        assertEquals(listOf(media("forced")), store.state.value.videos)
+    }
+
+    @Test
+    fun ordinaryRefreshAfterCompletedForcedRefreshDoesNotJoinStaleOrdinaryScan() = runBlocking {
+        val scanner = DeferredScanner()
+        val store = MediaLibraryStore(scanner)
+        val ordinaryA = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        scanner.started(0).await()
+        val forcedB = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = true) }
+        scanner.started(1).await()
+        scanner.complete(1, success(videos = listOf(media("forced"))))
+        forcedB.await()
+
+        val ordinaryC = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        assertEquals(listOf(false, true), scanner.calls)
+        assertTrue(ordinaryC.isCompleted)
+        scanner.complete(0, success(videos = listOf(media("ordinary"))))
+        ordinaryA.await()
+        ordinaryC.await()
     }
 
     @Test
@@ -43,12 +86,12 @@ class MediaLibraryStoreTest {
         val second = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
 
         assertEquals(listOf(false), scanner.calls)
-        scanner.complete(0, success(videos = mediaItems(1)))
+        scanner.complete(0, success(videos = listOf(media("one"))))
         first.await()
         second.await()
 
         assertEquals(listOf(false), scanner.calls)
-        assertEquals(1, store.state.value.videos.size)
+        assertEquals(listOf(media("one")), store.state.value.videos)
     }
 
     @Test
@@ -56,14 +99,14 @@ class MediaLibraryStoreTest {
         val scanner = DeferredScanner()
         val store = MediaLibraryStore(scanner)
         val failure = IllegalStateException("video query failed")
-        val refresh = async(Dispatchers.Default) { store.refresh(force = false) }
+        val refresh = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
 
         scanner.started(0).await()
         scanner.complete(
             0,
             MediaLibraryScanResult(
                 videos = MediaQueryResult.Failure(failure),
-                photos = MediaQueryResult.Success(mediaItems(2))
+                photos = MediaQueryResult.Success(listOf(media("photo")))
             )
         )
         refresh.await()
@@ -71,21 +114,72 @@ class MediaLibraryStoreTest {
         val error = store.state.value.error as LibraryError.PartialQueryFailure
         assertSame(failure, error.video)
         assertNull(error.photo)
-        assertEquals(2, store.state.value.photos.size)
-        assertEquals(emptyList<MediaItem>(), store.state.value.videos)
+        assertEquals(listOf(media("photo")), store.state.value.photos)
+        assertEquals(emptyList<LibraryMedia>(), store.state.value.videos)
+    }
+
+    @Test
+    fun photoQueryFailurePublishesAvailableVideosWithTypedPartialError() = runBlocking {
+        val scanner = DeferredScanner()
+        val store = MediaLibraryStore(scanner)
+        val failure = IllegalStateException("photo query failed")
+        val refresh = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        scanner.started(0).await()
+        scanner.complete(
+            0,
+            MediaLibraryScanResult(
+                videos = MediaQueryResult.Success(listOf(media("video"))),
+                photos = MediaQueryResult.Failure(failure)
+            )
+        )
+        refresh.await()
+
+        val error = store.state.value.error as LibraryError.PartialQueryFailure
+        assertNull(error.video)
+        assertSame(failure, error.photo)
+        assertEquals(listOf(media("video")), store.state.value.videos)
+        assertEquals(emptyList<LibraryMedia>(), store.state.value.photos)
+    }
+
+    @Test
+    fun scanFailurePublishesTypedErrorAndFinishesRefreshing() = runBlocking {
+        val scanner = DeferredScanner()
+        val store = MediaLibraryStore(scanner)
+        val failure = IllegalStateException("scanner failed")
+        val refresh = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        scanner.started(0).await()
+        scanner.fail(0, failure)
+        refresh.await()
+
+        val error = store.state.value.error as LibraryError.ScanFailure
+        assertSame(failure, error.cause)
+        assertFalse(store.state.value.isRefreshing)
+    }
+
+    @Test
+    fun cancellingScanOwnerConvergesRefreshingState() = runBlocking {
+        val scanner = DeferredScanner()
+        val store = MediaLibraryStore(scanner)
+        val refresh = async(start = CoroutineStart.UNDISPATCHED) { store.refresh(force = false) }
+
+        scanner.started(0).await()
+        refresh.cancelAndJoin()
+
+        assertFalse(store.state.value.isRefreshing)
+        assertEquals(1, store.state.value.generation)
     }
 
     private fun success(
-        videos: List<MediaItem> = emptyList(),
-        photos: List<MediaItem> = emptyList()
+        videos: List<LibraryMedia> = emptyList(),
+        photos: List<LibraryMedia> = emptyList()
     ) = MediaLibraryScanResult(
         videos = MediaQueryResult.Success(videos),
         photos = MediaQueryResult.Success(photos)
     )
 
-    @Suppress("UNCHECKED_CAST")
-    private fun mediaItems(count: Int): List<MediaItem> =
-        java.util.Collections.nCopies<Any?>(count, null) as List<MediaItem>
+    private fun media(id: String) = LibraryMedia(id = id)
 
     private class DeferredScanner : MediaLibraryScanner {
         val calls = mutableListOf<Boolean>()
@@ -105,6 +199,10 @@ class MediaLibraryStoreTest {
 
         fun complete(index: Int, result: MediaLibraryScanResult) {
             results[index].complete(result)
+        }
+
+        fun fail(index: Int, error: Throwable) {
+            results[index].completeExceptionally(error)
         }
     }
 }

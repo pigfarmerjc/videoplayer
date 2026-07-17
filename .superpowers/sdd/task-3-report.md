@@ -39,3 +39,32 @@ DONE_WITH_CONCERNS
 ## Commit
 
 Implementation: `3a09a8f refactor: centralize media library state`.
+
+## Review follow-up: concurrency and pure-boundary fixes
+
+### Correctness changes
+
+- Replaced Android/Compose-bound `MediaItem` state with the pure `LibraryMedia` DTO. The repository keeps Android-specific `MediaItem` values internally and adapts them at the scanner boundary.
+- Moved request selection, generation advancement, and the refreshing-state write into the same `Mutex` critical section. Result publication also rechecks generation and writes state while holding that mutex.
+- Added separate active forced and non-forced requests. Ordinary callers prefer the current forced request, including a completed forced result retained while an earlier ordinary scan is still running, so they cannot join the stale ordinary request.
+- Made owner cancellation clear the in-flight request and converge `isRefreshing` to `false` for the current generation. A cancelled follower does not cancel a shared owner request.
+- Replaced repository query `runCatching` with `captureQuery`, which rethrows `CancellationException` and only converts non-cancellation failures to typed partial results.
+
+### Added tests
+
+- Forced latest-wins completion.
+- Ordinary A / forced B / ordinary C interleavings, both before and after B completes.
+- Non-forced single-flight.
+- Video and photo query failures independently preserving the available media type.
+- Overall scanner failure.
+- Cancellation convergence.
+
+### RED/GREEN evidence for the follow-up
+
+- RED: with forced-result retention temporarily removed, the standalone JUnit run failed exactly at `ordinaryRefreshAfterCompletedForcedRefreshDoesNotJoinStaleOrdinaryScan`, because ordinary C remained joined to stale A.
+- GREEN: compiling `MediaLibraryState.kt`, `MediaLibraryStore.kt`, and `MediaLibraryStoreTest.kt` with the repository's Kotlin 1.9.22 compiler dependencies, then invoking JUnit 4.13.2, completed with `OK (8 tests)`.
+- `git diff --check` completed without whitespace errors.
+
+### Remaining limitation
+
+The normal Android Gradle unit-test task is still blocked before test execution by the pre-existing `VideoPlayerScreen.kt` errors at lines 4538 and 4620. The standalone compile-and-run evidence above verifies the pure store and its tests without that unrelated source file; repository adaptation was source-reviewed because the blocked Android compilation cannot reach it.

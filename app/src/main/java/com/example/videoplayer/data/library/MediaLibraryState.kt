@@ -1,11 +1,21 @@
 package com.example.videoplayer.data.library
 
-import com.example.videoplayer.data.model.MediaItem
+data class LibraryMedia(
+    val id: String,
+    val title: String = "",
+    val displayName: String = "",
+    val path: String = "",
+    val folderName: String = "",
+    val size: Long = 0L,
+    val dateAdded: Long = 0L,
+    val duration: Long = 0L,
+    val resolution: String = ""
+)
 
 data class MediaLibraryState(
     val generation: Long = 0L,
-    val videos: List<MediaItem> = emptyList(),
-    val photos: List<MediaItem> = emptyList(),
+    val videos: List<LibraryMedia> = emptyList(),
+    val photos: List<LibraryMedia> = emptyList(),
     val isRefreshing: Boolean = false,
     val error: LibraryError? = null
 )
@@ -24,7 +34,7 @@ sealed interface LibraryError {
 }
 
 sealed interface MediaQueryResult {
-    data class Success(val items: List<MediaItem>) : MediaQueryResult
+    data class Success(val items: List<LibraryMedia>) : MediaQueryResult
     data class Failure(val cause: Throwable) : MediaQueryResult
 }
 

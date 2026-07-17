@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.provider.MediaStore
+import com.example.videoplayer.data.library.LibraryMedia
 import com.example.videoplayer.data.library.MediaLibraryScanResult
 import com.example.videoplayer.data.library.MediaLibraryScanner
 import com.example.videoplayer.data.library.MediaQueryResult
@@ -12,6 +13,7 @@ import com.example.videoplayer.data.model.MediaFolder
 import com.example.videoplayer.data.model.MediaItem
 import com.example.videoplayer.data.model.MediaType
 import com.example.videoplayer.data.model.LayoutMode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
@@ -57,16 +59,26 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
         return cachedItems != null && now - cachedAtMs < MEDIA_CACHE_TTL_MS
     }
 
-    override suspend fun scan(force: Boolean): MediaLibraryScanResult = withContext(Dispatchers.IO) {
+    override suspend fun scan(force: Boolean): MediaLibraryScanResult =
+        scanRepository(force).toLibraryScanResult()
+
+    suspend fun scanMedia(forceRefresh: Boolean = false): List<MediaItem> {
+        return scanRepository(forceRefresh).items()
+    }
+
+    private suspend fun scanRepository(force: Boolean): RepositoryScanResult = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
         cachedItems?.takeIf { !force && now - cachedAtMs < MEDIA_CACHE_TTL_MS }?.let {
-            return@withContext it.toLibraryScanResult()
+            return@withContext RepositoryScanResult(
+                videos = RepositoryQueryResult.Success(it.filter { item -> item.type == MediaType.VIDEO }),
+                photos = RepositoryQueryResult.Success(it.filter { item -> item.type == MediaType.PHOTO })
+            )
         }
 
         val interner = StringInterner()
         val items = linkedMapOf<String, MediaItem>()
-        val videosDeferred = async { runCatching { scanVideos(interner) + scanIsoFiles(interner) } }
-        val imagesDeferred = async { runCatching { scanImages(interner) } }
+        val videosDeferred = async { captureQuery { scanVideos(interner) + scanIsoFiles(interner) } }
+        val imagesDeferred = async { captureQuery { scanImages(interner) } }
         val videoQuery = videosDeferred.await()
         val photoQuery = imagesDeferred.await()
 
@@ -103,21 +115,16 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
             cachedAtMs = now
         }
 
-        MediaLibraryScanResult(
+        RepositoryScanResult(
             videos = videoQuery.fold(
-                onSuccess = { MediaQueryResult.Success(normalized.filter { item -> item.type == MediaType.VIDEO }) },
-                onFailure = { MediaQueryResult.Failure(it) }
+                onSuccess = { RepositoryQueryResult.Success(normalized.filter { item -> item.type == MediaType.VIDEO }) },
+                onFailure = { RepositoryQueryResult.Failure(it) }
             ),
             photos = photoQuery.fold(
-                onSuccess = { MediaQueryResult.Success(normalized.filter { item -> item.type == MediaType.PHOTO }) },
-                onFailure = { MediaQueryResult.Failure(it) }
+                onSuccess = { RepositoryQueryResult.Success(normalized.filter { item -> item.type == MediaType.PHOTO }) },
+                onFailure = { RepositoryQueryResult.Failure(it) }
             )
         )
-    }
-
-    suspend fun scanMedia(forceRefresh: Boolean = false): List<MediaItem> {
-        val result = scan(forceRefresh)
-        return result.videos.itemsOrEmpty() + result.photos.itemsOrEmpty()
     }
 
     suspend fun getFolders(items: List<MediaItem>): List<MediaFolder> = withContext(Dispatchers.Default) {
@@ -695,16 +702,56 @@ class MediaRepository(private val context: Context) : MediaLibraryScanner {
         return list
     }
 
-    private fun List<MediaItem>.toLibraryScanResult(): MediaLibraryScanResult {
+    private suspend fun <T> captureQuery(block: suspend () -> T): Result<T> {
+        return try {
+            Result.success(block())
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Result.failure(error)
+        }
+    }
+
+    private fun RepositoryScanResult.toLibraryScanResult(): MediaLibraryScanResult {
         return MediaLibraryScanResult(
-            videos = MediaQueryResult.Success(filter { it.type == MediaType.VIDEO }),
-            photos = MediaQueryResult.Success(filter { it.type == MediaType.PHOTO })
+            videos = videos.toLibraryQueryResult(),
+            photos = photos.toLibraryQueryResult()
         )
     }
 
-    private fun MediaQueryResult.itemsOrEmpty(): List<MediaItem> = when (this) {
-        is MediaQueryResult.Success -> items
-        is MediaQueryResult.Failure -> emptyList()
+    private fun RepositoryQueryResult.toLibraryQueryResult(): MediaQueryResult = when (this) {
+        is RepositoryQueryResult.Success -> MediaQueryResult.Success(items.map { it.toLibraryMedia() })
+        is RepositoryQueryResult.Failure -> MediaQueryResult.Failure(cause)
+    }
+
+    private fun RepositoryScanResult.items(): List<MediaItem> =
+        videos.itemsOrEmpty() + photos.itemsOrEmpty()
+
+    private fun RepositoryQueryResult.itemsOrEmpty(): List<MediaItem> = when (this) {
+        is RepositoryQueryResult.Success -> items
+        is RepositoryQueryResult.Failure -> emptyList()
+    }
+
+    private fun MediaItem.toLibraryMedia(): LibraryMedia = LibraryMedia(
+        id = storageKey,
+        title = title,
+        displayName = displayName,
+        path = path,
+        folderName = folderName,
+        size = size,
+        dateAdded = dateAdded,
+        duration = duration,
+        resolution = resolution
+    )
+
+    private data class RepositoryScanResult(
+        val videos: RepositoryQueryResult,
+        val photos: RepositoryQueryResult
+    )
+
+    private sealed interface RepositoryQueryResult {
+        data class Success(val items: List<MediaItem>) : RepositoryQueryResult
+        data class Failure(val cause: Throwable) : RepositoryQueryResult
     }
 
     private fun isInternalPath(path: String): Boolean {
